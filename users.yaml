@@ -1,0 +1,14 @@
+# LeadFlow 帳號設定
+# 密碼需先用 bcrypt hash：
+#   python -c "import streamlit_authenticator as stauth; print(stauth.Hasher(['YOUR_PASSWORD']).generate()[0])"
+
+credentials:
+  usernames:
+    admin:
+      name: 管理員
+      password: "$2b$12$PLACEHOLDER_HASH_REPLACE_ME"  # 請替換為實際 hash
+
+cookie:
+  name: leadflow_auth
+  key: leadflow_secret_key_change_me  # 請替換為隨機字串
+  expiry_days: 30
