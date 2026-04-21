@@ -1150,6 +1150,7 @@ with tab_email:
                         company_id=cid or 0, recipient_email=to_email,
                         subject=f"[模擬] {subj}", status="dry_run", template_used=tpl,
                         tracking_uid="", sent_by=_username,
+                        body_snapshot=body, recipient_name=cust_name or "",
                     )
                     log_activity(_username, "dry_run_send",
                                  f"[模擬] 寄給 {cust_name or to_email}")
@@ -1177,6 +1178,7 @@ with tab_email:
                             company_id=cid, recipient_email=to_email,
                             subject=subj, status="sent", template_used=tpl,
                             tracking_uid=uid, sent_by=_username,
+                            body_snapshot=body, recipient_name=cust_name or "",
                         )
                         mark_contacted(cid)
                         log_activity(_username, "send_email",
@@ -1187,6 +1189,7 @@ with tab_email:
                             company_id=0, recipient_email=to_email,
                             subject=f"[測試] {subj}", status="test",
                             template_used=tpl, tracking_uid=uid, sent_by=_username,
+                            body_snapshot=body, recipient_name="(自己)",
                         )
                         log_activity(_username, "send_test_email",
                                      f"[測試] 寄給 {to_email}（追蹤 uid={uid[:8]}）")
@@ -1196,6 +1199,7 @@ with tab_email:
                         company_id=cid or 0, recipient_email=to_email,
                         subject=subj, status="failed", error_message=msg[:200],
                         template_used=tpl, tracking_uid=uid, sent_by=_username,
+                        body_snapshot=body, recipient_name=cust_name or "",
                     )
                 return ok, msg
 
@@ -1337,8 +1341,8 @@ with tab_history:
 with tab_analytics:
     st.markdown("""
     <div class="section-header">
-        <h3>📈 開發信追蹤分析</h3>
-        <span class="desc">系統在你寄出的每封信裡偷偷塞一張看不見的小圖片 + 把連結改成追蹤連結，客戶打開信或點連結，這邊就會 +1</span>
+        <h3>📈 信件追蹤</h3>
+        <span class="desc">每封寄出的信 — 寄給誰、什麼時候、內容、有沒有被打開、有沒有被點擊</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1404,156 +1408,231 @@ with tab_analytics:
 
     st.divider()
 
-    # ── 白話解釋 + 自我驗證（預設展開，不是 expander）──
-    st.markdown("### 🧪 怎麼知道追蹤真的有在跑？")
-    st.markdown(f"""
-<div style="background:rgba(250,204,21,0.06);border:1px solid rgba(250,204,21,0.15);
-            padding:16px 20px;border-radius:12px;line-height:1.9;font-size:0.94rem">
-<b>追蹤原理（3 句話版本）</b><br>
-1️⃣ 寄信時系統在信末塞一張 <b>1x1 像素透明圖</b>（肉眼看不見）<br>
-2️⃣ 客戶打開信件時，他的 Gmail 自動去下載這張圖片 → 系統就知道「被開了」<br>
-3️⃣ 信裡每個連結都被改寫成 <code>{TRACKING_BASE_URL}/t/click/xxx</code> → 有人點就會先經過系統再 302 轉回原網址<br>
-<br>
-<b>驗證 3 步驟</b>：<br>
-A. 到 <b>📨 開發信</b> → 下方「寄測試信」→ 填你自己的 Gmail → 按「寄測試信」（<b>別開 Dry-run</b>）<br>
-B. 回 Gmail 收信 → 打開那封「[測試]」信（<b>Gmail 要允許顯示圖片</b>）<br>
-C. 回這頁按「🔄 刷新」→ 下方「被打開信件數」+1 ✅
-</div>
-    """, unsafe_allow_html=True)
+    # ══════════════════════════════════════════════
+    # 🧪 批次測試工具：一次寄多封測試信，驗證真的有寄出
+    # ══════════════════════════════════════════════
+    with st.expander("🧪 批次測試工具 — 一次寄多封測試信給自己/同事，確認系統真的有寄出", expanded=False):
+        st.markdown(
+            "每行一個 Email。按下按鈕會一口氣寄給下列所有人，"
+            "可以拿來：**自測 10 封確認送達率**、**給同事看看我能不能收到**、**確認 Gmail 不會被標成垃圾信**。"
+        )
 
-    if st.button("🔄 刷新統計", use_container_width=False, key="refresh_tracking", type="primary"):
-        st.rerun()
+        _default_batch = st.session_state.get("gmail_user", "")
+        _batch_emails_raw = st.text_area(
+            "收件人（每行一個）",
+            value=_default_batch,
+            height=140,
+            placeholder="you@example.com\nteammate@example.com\nboss@company.com",
+            key="batch_test_emails",
+        )
+        _batch_subj = st.text_input(
+            "主旨",
+            value="[測試] LeadFlow 送達測試信",
+            key="batch_test_subject",
+        )
+        _batch_body = st.text_area(
+            "內文",
+            value=(
+                "您好，\n\n"
+                "這是 LeadFlow 系統的送達測試信。\n"
+                "如果你收到這封信，代表從系統寄到你信箱的 pipeline 正常運作。\n\n"
+                "— 業務部門"
+            ),
+            height=140,
+            key="batch_test_body",
+        )
 
-    # ── 最近測試信清單 ──
+        _bc1, _bc2 = st.columns([1, 3])
+        _batch_go = _bc1.button("🚀 寄出批次測試", type="primary", use_container_width=True,
+                                 key="btn_batch_test")
+        _emails_parsed = [e.strip() for e in (_batch_emails_raw or "").splitlines()
+                          if e.strip() and "@" in e]
+        _bc2.caption(f"共 {len(_emails_parsed)} 個有效 Email 會寄出")
+
+        if _batch_go:
+            if not _emails_parsed:
+                st.error("請至少輸入一個有效 Email")
+            elif not st.session_state.get("gmail_user") or not st.session_state.get("gmail_pwd"):
+                st.error("請先到「📨 開發信」頁設定 Gmail 帳號 / App Password")
+            else:
+                _results = []
+                _progress = st.progress(0.0, text="準備寄送...")
+                import os as _os
+                _os.environ["GMAIL_USER"] = st.session_state.get("gmail_user", "")
+                _os.environ["GMAIL_APP_PASSWORD"] = st.session_state.get("gmail_pwd", "")
+                from mailer.gmail_sender import get_sender as _gs
+                from mailer.tracking import gen_tracking_uid as _gu, inject_tracking as _it
+                from database.db import log_email_sent as _les, log_activity as _lact
+                _sender = _gs()
+                _me_user = st.session_state.get("username", "")
+                for _i, _em in enumerate(_emails_parsed, 1):
+                    _progress.progress(_i / len(_emails_parsed),
+                                       text=f"寄送中 ({_i}/{len(_emails_parsed)})... {_em}")
+                    _uid = _gu() if TRACKING_BASE_URL else ""
+                    _body_final, _is_html = _it(_batch_body, _uid, TRACKING_BASE_URL, is_html=False)
+                    try:
+                        _ok, _msg = _sender.send_email(
+                            to=_em, subject=_batch_subj, body=_body_final,
+                            sender_name=st.session_state.get("sender_name", "業務部門"),
+                            html=_is_html,
+                        )
+                    except Exception as _err:
+                        _ok, _msg = False, str(_err)[:200]
+                    _les(
+                        company_id=0, recipient_email=_em,
+                        subject=f"[批次測試] {_batch_subj}",
+                        status="test" if _ok else "failed",
+                        error_message="" if _ok else _msg[:200],
+                        template_used="批次測試", tracking_uid=_uid,
+                        sent_by=_me_user, body_snapshot=_batch_body,
+                        recipient_name="(批次測試)",
+                    )
+                    _results.append({"email": _em, "ok": _ok, "msg": _msg})
+                _lact(_me_user, "batch_test",
+                      f"批次測試 {len(_emails_parsed)} 封 · 成功 {sum(1 for r in _results if r['ok'])}")
+                _progress.progress(1.0, text="完成！")
+                _ok_n = sum(1 for r in _results if r["ok"])
+                _fail_n = len(_results) - _ok_n
+                if _fail_n == 0:
+                    st.success(f"✅ 全部 {_ok_n} 封都已送出，去各自信箱看看有沒有收到")
+                else:
+                    st.warning(f"✅ 成功 {_ok_n} · ❌ 失敗 {_fail_n}")
+                for _r in _results:
+                    if _r["ok"]:
+                        st.markdown(f"- ✅ `{_r['email']}` 已寄出")
+                    else:
+                        st.markdown(f"- ❌ `{_r['email']}` — {_r['msg'][:100]}")
+                st.caption("💡 提示：這些信會出現在下方「每封信詳細追蹤」表格，被打開會自動顯示 ✅")
+
+    st.divider()
+
+    # ══════════════════════════════════════════════
+    # 📋 每封信詳細追蹤（主表格）
+    # ══════════════════════════════════════════════
+    st.markdown("### 📋 每封信詳細追蹤")
+
     _conn = _gc()
-    _test_rows = _conn.execute("""
-        SELECT sent_at, recipient_email, subject, tracking_uid
+    _all_logs = _conn.execute("""
+        SELECT id, sent_at, recipient_email, recipient_name, subject, status,
+               tracking_uid, sent_by, template_used, body_snapshot, error_message, company_id
         FROM email_logs
-        WHERE status='test' AND tracking_uid IS NOT NULL AND tracking_uid != ''
-        ORDER BY sent_at DESC LIMIT 5
+        ORDER BY sent_at DESC
+        LIMIT 100
     """).fetchall()
 
-    if _test_rows:
-        st.markdown("#### 🧾 最近 5 封測試信")
-        st.caption("如果你沒辦法去 Gmail 收信，可以按「模擬」按鈕直接寫一筆事件進資料庫，驗證整條 pipeline 走得通。")
-        for _r in _test_rows:
-            _uid = _r["tracking_uid"]
-            _opened = _conn.execute(
-                "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='open'",
-                (_uid,),
-            ).fetchone()[0]
-            _clicked = _conn.execute(
-                "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='click'",
-                (_uid,),
-            ).fetchone()[0]
-            _dot = "🟢" if _opened else "⚪"
-            cA, cB, cC = st.columns([4, 2, 2])
-            cA.markdown(
-                f"{_dot} `{_r['sent_at'][:16].replace('T',' ')}` → **{_r['recipient_email']}**  \n"
-                f"開信 <b>{_opened}</b> 次　·　點擊 <b>{_clicked}</b> 次",
-                unsafe_allow_html=True,
+    if not _all_logs:
+        st.info("📭 還沒寄過任何信。上面的「批次測試工具」或「📨 開發信」tab 試著寄一封。")
+    else:
+        # Filter UI
+        fc1, fc2, fc3 = st.columns([2, 2, 3])
+        _f_status = fc1.multiselect(
+            "類型",
+            options=["sent", "test", "dry_run", "failed"],
+            default=["sent", "test"],
+            format_func=lambda x: {"sent": "📧 正式", "test": "🧪 測試",
+                                     "dry_run": "🎭 模擬", "failed": "❌ 失敗"}[x],
+            key="track_filter_status",
+        )
+        _f_only_opened = fc2.checkbox("只看已開啟的", value=False, key="track_filter_opened")
+        _f_search = fc3.text_input("搜尋收件人/主旨", placeholder="打字即時過濾",
+                                    key="track_filter_search")
+
+        # Build rows with open/click counts
+        _rows_out = []
+        for _l in _all_logs:
+            if _f_status and _l["status"] not in _f_status:
+                continue
+            _uid = _l["tracking_uid"] or ""
+            if _uid:
+                _opened_n = _conn.execute(
+                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='open'",
+                    (_uid,),
+                ).fetchone()[0]
+                _clicked_n = _conn.execute(
+                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='click'",
+                    (_uid,),
+                ).fetchone()[0]
+            else:
+                _opened_n = _clicked_n = 0
+
+            if _f_only_opened and _opened_n == 0:
+                continue
+            if _f_search:
+                _s = _f_search.lower()
+                if _s not in (_l["recipient_email"] or "").lower() and \
+                   _s not in (_l["subject"] or "").lower() and \
+                   _s not in (_l["recipient_name"] or "").lower():
+                    continue
+            _rows_out.append((_l, _opened_n, _clicked_n))
+
+        st.caption(f"符合條件：{len(_rows_out)} 封")
+
+        # Render each row as expandable
+        for _l, _op_n, _cl_n in _rows_out[:50]:
+            _tag = {"sent": "📧 正式", "test": "🧪 測試",
+                     "dry_run": "🎭 模擬", "failed": "❌ 失敗"}.get(_l["status"], _l["status"])
+            _open_badge = f"👀 **{_op_n}** 次" if _op_n > 0 else "—"
+            _click_badge = f"🔗 **{_cl_n}** 次" if _cl_n > 0 else "—"
+            _title = (
+                f"{_tag}　·　{_l['sent_at'][:16].replace('T', ' ')}　·　"
+                f"→ {_l['recipient_email']}　·　開信 {_open_badge}　·　點擊 {_click_badge}"
             )
-            if cB.button("🖼 模擬開啟", key=f"sim_open_{_uid}", use_container_width=True):
-                from database.db import record_email_event
-                record_email_event(_uid, "open", user_agent="self-test", ip_hash="local")
-                st.rerun()
-            if cC.button("🔗 模擬點擊", key=f"sim_click_{_uid}", use_container_width=True):
-                from database.db import record_email_event
-                record_email_event(_uid, "click", target_url="self-test",
-                                   user_agent="self-test", ip_hash="local")
-                st.rerun()
+            with st.expander(_title, expanded=False):
+                mc1, mc2 = st.columns([2, 1])
+                with mc1:
+                    st.markdown(f"**主旨**：{_l['subject']}")
+                    if _l["recipient_name"]:
+                        st.markdown(f"**收件人名稱**：{_l['recipient_name']}")
+                    if _l["sent_by"]:
+                        st.markdown(f"**寄件操作者**：{_l['sent_by']}")
+                    if _l["template_used"]:
+                        st.markdown(f"**使用模板**：{_l['template_used']}")
+                    if _l["error_message"]:
+                        st.error(f"錯誤：{_l['error_message']}")
+                with mc2:
+                    if _l["tracking_uid"]:
+                        st.markdown(f"**追蹤 UID**：`{_l['tracking_uid'][:16]}…`")
+                        # 手動模擬工具
+                        mbc1, mbc2 = st.columns(2)
+                        if mbc1.button("🖼 模擬開啟", key=f"detail_sim_open_{_l['id']}",
+                                        use_container_width=True):
+                            from database.db import record_email_event
+                            record_email_event(_l["tracking_uid"], "open",
+                                                user_agent="self-test", ip_hash="manual")
+                            st.rerun()
+                        if mbc2.button("🔗 模擬點擊", key=f"detail_sim_click_{_l['id']}",
+                                        use_container_width=True):
+                            from database.db import record_email_event
+                            record_email_event(_l["tracking_uid"], "click",
+                                                target_url="manual-test",
+                                                user_agent="self-test", ip_hash="manual")
+                            st.rerun()
+                    else:
+                        st.caption("無追蹤 UID（dry_run 模式不注入追蹤）")
 
-    st.markdown("""
-    <div class="section-header">
-        <h3>模板效果比較</h3>
-        <span class="desc">依主旨分群，找出高回應模板</span>
-    </div>
-    """, unsafe_allow_html=True)
+                st.markdown("**信件內文**")
+                _body_snap = _l["body_snapshot"] or "（未保存內文）"
+                st.text_area("", value=_body_snap, height=180,
+                             key=f"detail_body_{_l['id']}",
+                             label_visibility="collapsed", disabled=True)
 
-    template_rows = get_template_stats()
-    if not template_rows:
-        st.markdown("""
-        <div class="empty-state">
-            <div class="icon">📊</div>
-            <h3>尚無模板數據</h3>
-            <p>寄出含追蹤的信件後，各主旨模板的開信 / 點擊表現會在此呈現</p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        tpl_df = pd.DataFrame([
-            {
-                "主旨模板": t["template"][:50],
-                "寄出": t["sent"],
-                "開信": t["opened"],
-                "點擊": t["clicked"],
-                "開信率": f"{t['open_rate']}%",
-                "點擊率": f"{t['click_rate']}%",
-            }
-            for t in template_rows
-        ])
-        st.dataframe(
-            tpl_df,
-            use_container_width=True,
-            hide_index=True,
-            height=min(350, 60 + 35 * len(tpl_df)),
-            column_config={
-                "主旨模板": st.column_config.TextColumn(width="large"),
-                "寄出": st.column_config.NumberColumn(width="small", format="%d"),
-                "開信": st.column_config.NumberColumn(width="small", format="%d"),
-                "點擊": st.column_config.NumberColumn(width="small", format="%d"),
-                "開信率": st.column_config.TextColumn(width="small"),
-                "點擊率": st.column_config.TextColumn(width="small"),
-            },
-        )
-
-    st.markdown("""
-    <div class="section-header">
-        <h3>熱門客戶</h3>
-        <span class="desc">依點擊次數排序，優先跟進</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    hot_leads = get_hot_leads()
-    if not hot_leads:
-        st.markdown("""
-        <div class="empty-state">
-            <div class="icon">🔥</div>
-            <h3>尚無熱門客戶</h3>
-            <p>當潛在客戶點擊過你寄出的信件連結，會依熱度排序出現在這裡</p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        hot_df = pd.DataFrame([
-            {
-                "公司": h.get("cust_name", ""),
-                "HR": h.get("hr_name") or "—",
-                "Email": h.get("email") or "—",
-                "電話": h.get("phone") or "—",
-                "產業": h.get("industry", ""),
-                "開信": h.get("open_count", 0),
-                "點擊": h.get("click_count", 0),
-                "最近事件": (h.get("last_event_at") or "")[:16].replace("T", " "),
-                "已聯繫": "✅" if h.get("contacted") else "",
-            }
-            for h in hot_leads
-        ])
-        st.dataframe(
-            hot_df,
-            use_container_width=True,
-            hide_index=True,
-            height=min(420, 60 + 35 * len(hot_df)),
-            column_config={
-                "公司": st.column_config.TextColumn(width="medium"),
-                "HR": st.column_config.TextColumn(width="small"),
-                "Email": st.column_config.TextColumn(width="large"),
-                "電話": st.column_config.TextColumn(width="medium"),
-                "產業": st.column_config.TextColumn(width="small"),
-                "開信": st.column_config.NumberColumn(width="small", format="%d"),
-                "點擊": st.column_config.NumberColumn(width="small", format="%d"),
-                "最近事件": st.column_config.TextColumn(width="medium"),
-                "已聯繫": st.column_config.TextColumn(width="small"),
-            },
-        )
+                # 列出該信件的開信/點擊事件
+                if _l["tracking_uid"]:
+                    _events = _conn.execute("""
+                        SELECT event_type, occurred_at, target_url, ip_hash
+                        FROM email_events
+                        WHERE tracking_uid = ?
+                        ORDER BY occurred_at DESC
+                    """, (_l["tracking_uid"],)).fetchall()
+                    if _events:
+                        st.markdown("**事件紀錄**")
+                        for _ev in _events:
+                            _et = "👀 開啟" if _ev["event_type"] == "open" else "🔗 點擊"
+                            _url_part = f" → {_ev['target_url'][:80]}" if _ev["target_url"] else ""
+                            st.markdown(
+                                f"`{_ev['occurred_at'][:19].replace('T', ' ')}` "
+                                f"{_et}{_url_part}"
+                            )
 
 
 # ── TAB 5：Gmail 設定教學 ──

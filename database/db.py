@@ -27,7 +27,7 @@ try:
 except ImportError:
     DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # ── Thread-local 連線池 ──
 _local = threading.local()
@@ -229,6 +229,16 @@ def _run_migrations(conn: sqlite3.Connection):
         _set_schema_version(conn, 5)
         logger.info("Migration v5: 協作鎖與在線狀態（user_sessions, resource_locks）")
 
+    if current < 6:
+        # v6: email_logs 儲存完整內文 + 收件人名稱（為「每封信詳細追蹤」顯示用）
+        email_log_cols = {row[1] for row in conn.execute("PRAGMA table_info(email_logs)").fetchall()}
+        if "body_snapshot" not in email_log_cols:
+            conn.execute("ALTER TABLE email_logs ADD COLUMN body_snapshot TEXT DEFAULT ''")
+        if "recipient_name" not in email_log_cols:
+            conn.execute("ALTER TABLE email_logs ADD COLUMN recipient_name TEXT DEFAULT ''")
+        _set_schema_version(conn, 6)
+        logger.info("Migration v6: email_logs 加 body_snapshot + recipient_name")
+
     conn.commit()
 
 
@@ -401,10 +411,13 @@ def log_email_sent(
     tracking_uid: str = "",
     body_html: bool = False,
     sent_by: str = "",
+    body_snapshot: str = "",
+    recipient_name: str = "",
 ) -> int:
     """記錄一筆寄信 log，回傳 email_log id（供追蹤用）
     status: 'sent' | 'failed' | 'dry_run' | 'test'
     - dry_run / test 時 company_id 可為 0（非真實客戶）
+    - body_snapshot: 存信件原文方便日後查看
     """
     init_db()
     now = datetime.now().isoformat()
@@ -412,11 +425,13 @@ def log_email_sent(
     cur = conn.execute("""
         INSERT INTO email_logs
         (company_id, recipient_email, subject, sent_at, status,
-         error_message, template_used, tracking_uid, body_html, sent_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         error_message, template_used, tracking_uid, body_html, sent_by,
+         body_snapshot, recipient_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (company_id or 0, recipient_email, subject, now, status,
           error_message, template_used, tracking_uid,
-          1 if body_html else 0, sent_by))
+          1 if body_html else 0, sent_by,
+          (body_snapshot or "")[:5000], recipient_name or ""))
     conn.commit()
     return cur.lastrowid
 
