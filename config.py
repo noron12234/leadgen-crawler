@@ -15,8 +15,16 @@ load_dotenv()
 
 # ── 路徑 ──
 BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+# 優先使用 /data（Fly volume mount 點），否則 fallback 到本地 data/
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+if not DATA_DIR.exists():
+    DATA_DIR = BASE_DIR / "data"
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # 雲端環境權限問題時退回本地
+    DATA_DIR = BASE_DIR / "data"
+    DATA_DIR.mkdir(exist_ok=True)
 
 # ── 資料庫 ──
 DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "leads.db")))
@@ -33,6 +41,11 @@ GMAIL_TOKEN_PATH = Path(os.getenv("GMAIL_TOKEN_PATH", str(DATA_DIR / "token.json
 
 # ── 每日信件限額 ──
 DAILY_EMAIL_QUOTA = int(os.getenv("DAILY_EMAIL_QUOTA", "100"))
+
+# ── 開發信追蹤（需求規格） ──
+# 例：https://leadflow.example.com 或 http://tracking.yourdomain.com:8503
+# 未設定時會自動關閉追蹤注入（寄信流程仍可運作）
+TRACKING_BASE_URL = os.getenv("TRACKING_BASE_URL", "").rstrip("/")
 
 # ── 爬蟲 ──
 CRAWLER_DELAY = float(os.getenv("CRAWLER_DELAY", "0.6"))

@@ -90,6 +90,9 @@ def send_email(
         msg["Subject"] = subject
         msg["From"] = formataddr((sender_name or from_email, from_email))
         msg["To"] = to
+        # Gmail 2024/02 新規：List-Unsubscribe 對 < 5000/日 也是 quality signal
+        msg["List-Unsubscribe"] = f"<mailto:{from_email}?subject=unsubscribe>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
         mime_type = "html" if html else "plain"
         msg.attach(MIMEText(body, mime_type, "utf-8"))
@@ -131,6 +134,11 @@ def send_batch(
         list of {"email": str, "cust_name": str, "success": bool, "message": str}
     """
     import time
+    from mailer.tracking import gen_tracking_uid, inject_tracking
+    try:
+        from config import TRACKING_BASE_URL
+    except ImportError:
+        TRACKING_BASE_URL = ""
 
     results = []
     for r in recipients:
@@ -146,12 +154,16 @@ def send_batch(
         subject = subject_template.format(**ctx)
         body = body_template.format(**ctx)
 
+        # ── 注入追蹤（pixel + 連結改寫）──
+        uid = gen_tracking_uid()
+        body_to_send, is_html_after = inject_tracking(body, uid, TRACKING_BASE_URL, html)
+
         ok, msg = send_email(
             to=email,
             subject=subject,
-            body=body,
+            body=body_to_send,
             sender_name=sender_name,
-            html=html,
+            html=is_html_after,
         )
         results.append({**r, "success": ok, "message": msg})
 
@@ -167,6 +179,8 @@ def send_batch(
                     status="sent" if ok else "failed",
                     error_message="" if ok else msg,
                     template_used=subject_template,
+                    tracking_uid=uid if ok and TRACKING_BASE_URL else "",
+                    body_html=is_html_after,
                 )
             except Exception as log_err:
                 logger.debug(f"寫入 email_log 失敗：{log_err}")

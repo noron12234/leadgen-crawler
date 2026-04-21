@@ -1,0 +1,53 @@
+# Fly.io 部署設定 — LeadFlow（B2B 名單開發系統）
+# 同一台機器跑兩個 service：
+#   - Streamlit UI（port 8501）→ 對外 443 (HTTPS)
+#   - Tracking pixel server（port 8503）→ 對外 /t/* 路徑
+
+app = "leadgen-app"    # ← 初次 deploy 時會被 fly launch 替換
+primary_region = "nrt"         # Tokyo（台灣訪問延遲最低）
+
+[build]
+  dockerfile = "Dockerfile"
+
+# ── 對外主服務：Streamlit ──
+[http_service]
+  internal_port = 8501
+  force_https = true
+  auto_stop_machines = "stop"     # 沒流量時自動停（省錢）
+  auto_start_machines = true      # 有流量自動開
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+# ── 第二個對外 port：追蹤 pixel server ──
+# 透過 /t/open /t/click 路徑由主服務反代，但簡單起見直接開第二個 HTTPS
+[[services]]
+  internal_port = 8503
+  protocol = "tcp"
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 8443
+    handlers = ["tls", "http"]
+    force_https = true
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+# ── 持久儲存：SQLite DB ──
+# 掛到 /data，DB_PATH=/data/leads.db（Dockerfile 已設）
+[[mounts]]
+  source = "leadflow_data"
+  destination = "/data"
+
+# ── 資源配置（最小機型就夠用）──
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

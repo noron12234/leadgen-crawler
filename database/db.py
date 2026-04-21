@@ -11,7 +11,7 @@ import json
 import logging
 import threading
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import sys
 import os
 
@@ -27,7 +27,7 @@ try:
 except ImportError:
     DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 5
 
 # ── Thread-local 連線池 ──
 _local = threading.local()
@@ -151,6 +151,84 @@ def _run_migrations(conn: sqlite3.Connection):
         _set_schema_version(conn, 2)
         logger.info("Migration v2: 新增 description, job_titles 欄位")
 
+    if current < 3:
+        # v3: 開發信追蹤（需求規格）
+        email_log_cols = {row[1] for row in conn.execute("PRAGMA table_info(email_logs)").fetchall()}
+        if "tracking_uid" not in email_log_cols:
+            conn.execute("ALTER TABLE email_logs ADD COLUMN tracking_uid TEXT")
+        if "body_html" not in email_log_cols:
+            conn.execute("ALTER TABLE email_logs ADD COLUMN body_html INTEGER DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_logs_uid ON email_logs(tracking_uid)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                tracking_uid TEXT NOT NULL,
+                event_type   TEXT NOT NULL,  -- 'open' | 'click'
+                occurred_at  TEXT NOT NULL,
+                target_url   TEXT,           -- click 事件的原始連結
+                user_agent   TEXT,
+                ip_hash      TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_events_uid ON email_events(tracking_uid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_events_type ON email_events(event_type)")
+
+        company_cols = {row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()}
+        if "is_hot_lead" not in company_cols:
+            conn.execute("ALTER TABLE companies ADD COLUMN is_hot_lead INTEGER DEFAULT 0")
+        _set_schema_version(conn, 3)
+        logger.info("Migration v3: 新增追蹤欄位（email_events, tracking_uid, is_hot_lead）")
+
+    if current < 4:
+        # v4: 多人協作審計欄位
+        email_log_cols = {row[1] for row in conn.execute("PRAGMA table_info(email_logs)").fetchall()}
+        if "sent_by" not in email_log_cols:
+            conn.execute("ALTER TABLE email_logs ADD COLUMN sent_by TEXT DEFAULT ''")
+
+        # companies 加「誰爬到這家公司」
+        company_cols = {row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()}
+        if "crawled_by" not in company_cols:
+            conn.execute("ALTER TABLE companies ADD COLUMN crawled_by TEXT DEFAULT ''")
+
+        # 通用活動 log（爬蟲、寄信、登入、匯出等）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                username    TEXT NOT NULL,
+                action      TEXT NOT NULL,      -- 'login' | 'crawl' | 'send_email' | 'export' | ...
+                detail      TEXT,               -- 自由文字描述
+                occurred_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_user ON activity_log(username)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_action ON activity_log(action)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_time ON activity_log(occurred_at DESC)")
+
+        _set_schema_version(conn, 4)
+        logger.info("Migration v4: 多人協作欄位（sent_by, activity_log）")
+
+    if current < 5:
+        # v5: 協作鎖 + 在線狀態
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                username        TEXT PRIMARY KEY,
+                last_heartbeat  TEXT NOT NULL,
+                current_page    TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resource_locks (
+                lock_name   TEXT PRIMARY KEY,   -- 'crawl' | 'email'
+                locked_by   TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                note        TEXT DEFAULT ''
+            )
+        """)
+        _set_schema_version(conn, 5)
+        logger.info("Migration v5: 協作鎖與在線狀態（user_sessions, resource_locks）")
+
     conn.commit()
 
 
@@ -164,10 +242,10 @@ def init_db():
 # Companies CRUD
 # ══════════════════════════════════════════════════════
 
-def upsert_companies(companies: list[dict]) -> tuple[int, int]:
+def upsert_companies(companies: list[dict], crawled_by: str = "") -> tuple[int, int]:
     """
     批次插入或更新公司資料
-    - 新公司：直接插入
+    - 新公司：直接插入（記錄 crawled_by）
     - 既有公司：補充空白欄位（email/phone/hr_name），更新 last_seen
 
     Returns:
@@ -195,8 +273,8 @@ def upsert_companies(companies: list[dict]) -> tuple[int, int]:
                 (normalized_name, source, cust_id, cust_name, industry, employee_count,
                  address, phone, hr_name, email, website, job_url, company_url,
                  has_snack_benefit, welfare_tags, first_seen, last_seen, contacted,
-                 description, job_titles)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)
+                 description, job_titles, crawled_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)
             """, (
                 key,
                 c.get("source", ""),
@@ -217,6 +295,7 @@ def upsert_companies(companies: list[dict]) -> tuple[int, int]:
                 now,
                 c.get("description", ""),
                 c.get("job_titles", ""),
+                crawled_by,
             ))
             new_count += 1
         else:
@@ -319,16 +398,109 @@ def log_email_sent(
     status: str = "sent",
     error_message: str = "",
     template_used: str = "",
-):
-    """記錄一筆寄信 log"""
+    tracking_uid: str = "",
+    body_html: bool = False,
+    sent_by: str = "",
+) -> int:
+    """記錄一筆寄信 log，回傳 email_log id（供追蹤用）"""
     init_db()
     now = datetime.now().isoformat()
     conn = get_connection()
-    conn.execute("""
-        INSERT INTO email_logs (company_id, recipient_email, subject, sent_at, status, error_message, template_used)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (company_id, recipient_email, subject, now, status, error_message, template_used))
+    cur = conn.execute("""
+        INSERT INTO email_logs
+        (company_id, recipient_email, subject, sent_at, status,
+         error_message, template_used, tracking_uid, body_html, sent_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (company_id, recipient_email, subject, now, status,
+          error_message, template_used, tracking_uid,
+          1 if body_html else 0, sent_by))
     conn.commit()
+    return cur.lastrowid
+
+
+# ══════════════════════════════════════════════════════
+# 活動 Log（給超管後台用）
+# ══════════════════════════════════════════════════════
+
+def log_activity(username: str, action: str, detail: str = ""):
+    """記錄使用者活動（登入、爬蟲、寄信、匯出等）"""
+    if not username:
+        return
+    init_db()
+    now = datetime.now().isoformat()
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO activity_log (username, action, detail, occurred_at)
+            VALUES (?, ?, ?, ?)
+        """, (username, action, detail[:500], now))
+        conn.commit()
+    except Exception as e:
+        logger.debug(f"log_activity 失敗：{e}")
+
+
+def get_user_stats() -> list[dict]:
+    """超管用：所有使用者的統計摘要"""
+    init_db()
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT
+            COALESCE(NULLIF(sent_by, ''), '（未標記）') AS username,
+            COUNT(*) AS total_sent,
+            SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS success,
+            SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+            MAX(sent_at) AS last_sent_at
+        FROM email_logs
+        GROUP BY username
+        ORDER BY total_sent DESC
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_activity_log(limit: int = 200, username: str = "") -> list[dict]:
+    """取得活動紀錄（可依使用者過濾）"""
+    init_db()
+    conn = get_connection()
+    if username:
+        rows = conn.execute("""
+            SELECT * FROM activity_log
+            WHERE username = ?
+            ORDER BY occurred_at DESC
+            LIMIT ?
+        """, (username, limit)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT * FROM activity_log
+            ORDER BY occurred_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_user_email_breakdown() -> list[dict]:
+    """每位使用者寄的信的追蹤成效"""
+    init_db()
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT
+            COALESCE(NULLIF(el.sent_by, ''), '（未標記）') AS username,
+            COUNT(*) AS sent,
+            COUNT(DISTINCT CASE WHEN ev.event_type='open'  THEN el.tracking_uid END) AS opened,
+            COUNT(DISTINCT CASE WHEN ev.event_type='click' THEN el.tracking_uid END) AS clicked
+        FROM email_logs el
+        LEFT JOIN email_events ev ON ev.tracking_uid = el.tracking_uid
+        WHERE el.status='sent'
+        GROUP BY username
+        ORDER BY sent DESC
+    """).fetchall()
+    result = []
+    for r in rows:
+        r = dict(r)
+        sent = r.get("sent", 0) or 0
+        r["open_rate"]  = round((r.get("opened") or 0) / sent * 100, 1) if sent else 0
+        r["click_rate"] = round((r.get("clicked") or 0) / sent * 100, 1) if sent else 0
+        result.append(r)
+    return result
 
 
 def get_daily_email_count() -> int:
@@ -387,10 +559,150 @@ def clear_all():
     """清空所有公司資料與寄信記錄"""
     init_db()
     conn = get_connection()
+    conn.execute("DELETE FROM email_events")
     conn.execute("DELETE FROM email_logs")
     conn.execute("DELETE FROM companies")
     conn.commit()
     logger.info("資料庫已清空")
+
+
+# ══════════════════════════════════════════════════════
+# 開發信追蹤（需求規格）
+# ══════════════════════════════════════════════════════
+
+def record_email_event(
+    tracking_uid: str,
+    event_type: str,
+    target_url: str = "",
+    user_agent: str = "",
+    ip_hash: str = "",
+):
+    """
+    記錄一筆開信/點擊事件，並在必要時將該公司標記為熱門客戶。
+    event_type: 'open' | 'click'
+    """
+    if event_type not in ("open", "click"):
+        return
+    init_db()
+    conn = get_connection()
+    now = datetime.now().isoformat()
+    conn.execute("""
+        INSERT INTO email_events (tracking_uid, event_type, occurred_at, target_url, user_agent, ip_hash)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (tracking_uid, event_type, now, target_url, user_agent, ip_hash))
+
+    # 熱門客戶：只要點擊任一連結即標記
+    if event_type == "click":
+        row = conn.execute(
+            "SELECT company_id FROM email_logs WHERE tracking_uid = ?", (tracking_uid,)
+        ).fetchone()
+        if row and row["company_id"]:
+            conn.execute("UPDATE companies SET is_hot_lead = 1 WHERE id = ?", (row["company_id"],))
+    conn.commit()
+
+
+def get_tracking_stats() -> dict:
+    """
+    整體追蹤統計：開信率、點擊率、熱門客戶數
+    """
+    init_db()
+    conn = get_connection()
+    sent = conn.execute(
+        "SELECT COUNT(*) FROM email_logs WHERE status='sent' AND tracking_uid IS NOT NULL AND tracking_uid != ''"
+    ).fetchone()[0]
+    opened = conn.execute("""
+        SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='open'
+    """).fetchone()[0]
+    clicked = conn.execute("""
+        SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='click'
+    """).fetchone()[0]
+    hot = conn.execute("SELECT COUNT(*) FROM companies WHERE is_hot_lead = 1").fetchone()[0]
+
+    def _pct(n, d):
+        return round(n / d * 100, 1) if d else 0.0
+
+    return {
+        "sent": sent,
+        "opened": opened,
+        "clicked": clicked,
+        "hot_leads": hot,
+        "open_rate": _pct(opened, sent),
+        "click_rate": _pct(clicked, sent),
+        "click_to_open_rate": _pct(clicked, opened),
+    }
+
+
+def get_template_stats() -> list[dict]:
+    """各模板成效比較：寄出 / 開信 / 點擊"""
+    init_db()
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT
+            COALESCE(NULLIF(template_used, ''), '（未分類）') AS template,
+            COUNT(*) AS sent,
+            SUM(CASE WHEN EXISTS (
+                SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid AND ev.event_type='open'
+            ) THEN 1 ELSE 0 END) AS opened,
+            SUM(CASE WHEN EXISTS (
+                SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid AND ev.event_type='click'
+            ) THEN 1 ELSE 0 END) AS clicked
+        FROM email_logs el
+        WHERE status='sent' AND tracking_uid IS NOT NULL AND tracking_uid != ''
+        GROUP BY template
+        ORDER BY sent DESC
+    """).fetchall()
+    result = []
+    for r in rows:
+        sent = r["sent"] or 0
+        opened = r["opened"] or 0
+        clicked = r["clicked"] or 0
+        result.append({
+            "template": r["template"],
+            "sent": sent,
+            "opened": opened,
+            "clicked": clicked,
+            "open_rate": round(opened / sent * 100, 1) if sent else 0.0,
+            "click_rate": round(clicked / sent * 100, 1) if sent else 0.0,
+        })
+    return result
+
+
+def get_hot_leads() -> list[dict]:
+    """列出熱門客戶（有點擊過），依點擊次數排序"""
+    init_db()
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT c.*,
+               COUNT(DISTINCT CASE WHEN ev.event_type='open'  THEN ev.id END) AS open_count,
+               COUNT(DISTINCT CASE WHEN ev.event_type='click' THEN ev.id END) AS click_count,
+               MAX(ev.occurred_at) AS last_event_at
+        FROM companies c
+        JOIN email_logs el ON el.company_id = c.id
+        JOIN email_events ev ON ev.tracking_uid = el.tracking_uid
+        WHERE c.is_hot_lead = 1
+        GROUP BY c.id
+        ORDER BY click_count DESC, open_count DESC, last_event_at DESC
+    """).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["welfare_tags"] = json.loads(d.get("welfare_tags") or "[]")
+        except Exception:
+            d["welfare_tags"] = []
+        result.append(d)
+    return result
+
+
+def get_events_for_uid(tracking_uid: str) -> list[dict]:
+    """取得某封信的所有追蹤事件"""
+    init_db()
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM email_events WHERE tracking_uid = ? ORDER BY occurred_at ASC",
+        (tracking_uid,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ══════════════════════════════════════════════════════
@@ -470,4 +782,120 @@ def delete_linkedin_people_all():
     init_db()
     conn = get_connection()
     conn.execute("DELETE FROM linkedin_people")
+    conn.commit()
+
+
+# ══════════════════════════════════════════════════════
+# 在線狀態 + 協作鎖（多人同時使用）
+# ══════════════════════════════════════════════════════
+
+_HEARTBEAT_TTL = 60      # 超過 60 秒沒心跳視為離線
+_LOCK_TTL      = 900     # 鎖最多 15 分鐘自動過期（避免卡死）
+
+
+def heartbeat(username: str, page: str = ""):
+    """使用者心跳（每次 rerun 呼叫）"""
+    if not username:
+        return
+    init_db()
+    now = datetime.now().isoformat()
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO user_sessions (username, last_heartbeat, current_page)
+        VALUES (?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
+            last_heartbeat = excluded.last_heartbeat,
+            current_page = excluded.current_page
+    """, (username, now, page))
+    conn.commit()
+
+
+def get_online_users() -> list[dict]:
+    """取得目前在線使用者（近 60 秒內有心跳）"""
+    init_db()
+    cutoff = (datetime.now() - timedelta(seconds=_HEARTBEAT_TTL)).isoformat()
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT username, last_heartbeat, current_page
+        FROM user_sessions
+        WHERE last_heartbeat >= ?
+        ORDER BY last_heartbeat DESC
+    """, (cutoff,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def acquire_lock(lock_name: str, username: str, note: str = "") -> tuple[bool, str]:
+    """
+    嘗試取得鎖；回傳 (是否成功, 訊息)。
+    如果有別人佔用、且鎖未過期 → 失敗
+    自己已經持有 → 視為成功（續約）
+    """
+    init_db()
+    now_dt = datetime.now()
+    now = now_dt.isoformat()
+    expires = (now_dt + timedelta(seconds=_LOCK_TTL)).isoformat()
+
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT locked_by, expires_at FROM resource_locks WHERE lock_name = ?",
+        (lock_name,),
+    ).fetchone()
+
+    if row:
+        if row["expires_at"] < now:
+            # 已過期，可接管
+            pass
+        elif row["locked_by"] != username:
+            return False, f"{row['locked_by']} 正在使用中（到 {row['expires_at'][:16].replace('T',' ')}）"
+        else:
+            # 自己已持有 → 續約
+            conn.execute(
+                "UPDATE resource_locks SET acquired_at=?, expires_at=?, note=? WHERE lock_name=?",
+                (now, expires, note, lock_name),
+            )
+            conn.commit()
+            return True, "已取得"
+
+    conn.execute("""
+        INSERT INTO resource_locks (lock_name, locked_by, acquired_at, expires_at, note)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(lock_name) DO UPDATE SET
+            locked_by = excluded.locked_by,
+            acquired_at = excluded.acquired_at,
+            expires_at = excluded.expires_at,
+            note = excluded.note
+    """, (lock_name, username, now, expires, note))
+    conn.commit()
+    return True, "已取得"
+
+
+def release_lock(lock_name: str, username: str):
+    """釋放鎖（只有持有者能釋放）"""
+    init_db()
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM resource_locks WHERE lock_name = ? AND locked_by = ?",
+        (lock_name, username),
+    )
+    conn.commit()
+
+
+def get_lock_holder(lock_name: str) -> dict | None:
+    """查看誰正在持有某個鎖（若已過期回 None）"""
+    init_db()
+    now = datetime.now().isoformat()
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT locked_by, acquired_at, expires_at, note
+        FROM resource_locks
+        WHERE lock_name = ? AND expires_at >= ?
+    """, (lock_name, now)).fetchone()
+    return dict(row) if row else None
+
+
+def admin_force_release_lock(lock_name: str):
+    """超管強制釋放（卡住時救命）"""
+    init_db()
+    conn = get_connection()
+    conn.execute("DELETE FROM resource_locks WHERE lock_name = ?", (lock_name,))
     conn.commit()

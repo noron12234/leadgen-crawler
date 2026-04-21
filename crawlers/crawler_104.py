@@ -141,13 +141,15 @@ def decode_welfare_tags(job: dict) -> list[str]:
 
 def get_estimated_total(area: str = "6001001000") -> dict:
     """
-    查詢各福利碼的估計總公司數（只打第 1 頁，取 metadata.total）
-    用於 UI 顯示「估計可爬 ~X 家」
+    查詢各福利碼的估計職缺數與可爬公司數。
+    用 lastPage × count（perPage=30）算出 welfare filter 過後的真實職缺數。
 
     Returns:
-        {"wf27": 120, "wf19": 85, "wf18": 60, "estimated_unique": 200}
+        {"wf27": 1200, "wf19": 800, "wf18": 600,
+         "estimated_unique": 800,   # 估計可爬不重複公司數
+         "db_already": 0}           # 呼叫端可疊加 DB 現有數
     """
-    totals = {}
+    totals: dict = {}
     for wf_code in SNACK_WELFARE_CODES:
         url = "https://www.104.com.tw/jobs/search/api/jobs"
         params = {
@@ -156,7 +158,7 @@ def get_estimated_total(area: str = "6001001000") -> dict:
             "order": "15",
             "asc": "0",
             "page": "1",
-            "perPage": "1",  # 只要 metadata，不需要內容
+            "perPage": "30",
             "welfare": wf_code,
             "s9": "1",
         }
@@ -164,14 +166,17 @@ def get_estimated_total(area: str = "6001001000") -> dict:
         try:
             resp = request_with_retry(url, params=params, headers=headers, timeout=10)
             data = resp.json()
-            total = data.get("metadata", {}).get("total", 0)
-            totals[wf_code] = int(total)
+            pg = data.get("metadata", {}).get("pagination", {})
+            last_page  = int(pg.get("lastPage", 1) or 1)
+            count_page = int(pg.get("count", 30) or 30)
+            # lastPage × count_page = 這個 welfare filter 的總職缺數
+            totals[wf_code] = last_page * count_page
         except Exception:
             totals[wf_code] = 0
 
-    # 估計唯一公司數：取最大值的碼 * 1.3（各碼有重疊）
-    max_total = max(totals.values()) if totals else 0
-    estimated_unique = int(max_total * 1.3)
+    # 估計唯一公司數：取最多的福利碼職缺數 ÷ 2（一家公司平均 2 個職缺）
+    max_jobs = max(totals.values()) if totals else 0
+    estimated_unique = max(max_jobs // 2, 0)
     totals["estimated_unique"] = estimated_unique
     return totals
 
@@ -179,7 +184,8 @@ def get_estimated_total(area: str = "6001001000") -> dict:
 def crawl_snack_companies(
     areas: list[str] = None,
     max_pages: int = 3,
-    delay: float = 0.6,
+    delay: float = 0.4,
+    progress_callback=None,
 ) -> list[dict]:
     """
     主爬蟲函數：搜尋有零食/飲料/伙食福利的公司，抓取完整聯絡資訊
@@ -221,7 +227,7 @@ def crawl_snack_companies(
                         seen_ids.add(cid)
                         new_ids.append((cid, job))
 
-                # 批次抓公司詳細 + 職缺詳細（取 email）
+                # 只用 job_detail 取 email（company_detail API 目前被 104 封鎖）
                 for cid, job in new_ids:
                     job_id, job_url = extract_job_id(job)
                     link = job.get("link", {})
@@ -231,39 +237,25 @@ def crawl_snack_companies(
                         else f"https://www.104.com.tw{cust_path}"
                     ) if cust_path else ""
 
-                    time.sleep(delay)
-                    detail = get_company_detail(cid)
-
                     phone = ""
                     hr_name = ""
-                    address = ""
+                    address = job.get("jobAddrNoDesc", "")  # 從 job 本體取地址
                     website = ""
-
-                    if detail:
-                        phone = detail.get("phone") or ""
-                        hr_name = detail.get("hrName") or ""
-                        address = detail.get("address") or ""
-                        links = [
-                            detail.get(k)
-                            for k in ["corpLink1", "corpLink2", "corpLink3"]
-                            if detail.get(k)
-                        ]
-                        website = links[0] if links else ""
-
-                    # 從職缺詳細取 email（80% 填充率，公開不需登入）
                     email = ""
+
+                    # job_detail API 仍然正常，可取 email / hrName / phone
                     if job_id:
                         time.sleep(delay)
                         contact = get_job_detail(job_id, job_url)
                         if contact:
                             email = contact.get("email") or ""
-                            # 若公司層級沒有 HR 姓名，從職缺層級補充
-                            if not hr_name:
-                                hr_name = contact.get("hrName") or ""
-                            # 若公司層級沒有電話，從職缺層級補充
-                            if not phone and contact.get("phone"):
-                                phone_list = contact.get("phone") or []
-                                phone = phone_list[0] if phone_list else ""
+                            hr_name = contact.get("hrName") or ""
+                            phone_list = contact.get("phone") or []
+                            phone = phone_list[0] if isinstance(phone_list, list) and phone_list else str(phone_list) if phone_list else ""
+
+                    # 通知呼叫端有進度（供 UI 即時更新）
+                    if progress_callback:
+                        progress_callback(job.get("custName", cid), email)
 
                     companies.append(
                         {

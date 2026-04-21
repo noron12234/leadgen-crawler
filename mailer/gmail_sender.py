@@ -16,7 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_credentials() -> tuple[str, str]:
-    """從 config 或環境變數取 Gmail 帳號和應用程式密碼"""
+    """從 config 或環境變數取 Gmail 帳號和應用程式密碼
+
+    Google 產生的 App Password 中間有空格（例：`xxxx xxxx xxxx xxxx`）
+    SMTP login 必須拿掉空格才能通過，這裡統一清理。
+    """
     try:
         from config import GMAIL_USER, GMAIL_APP_PASSWORD
         user = GMAIL_USER or os.getenv("GMAIL_USER", "")
@@ -24,6 +28,9 @@ def _get_credentials() -> tuple[str, str]:
     except ImportError:
         user = os.getenv("GMAIL_USER", "")
         pwd = os.getenv("GMAIL_APP_PASSWORD", "")
+    # 清理 App Password 的空格與前後空白
+    pwd = (pwd or "").replace(" ", "").replace("\t", "").strip()
+    user = (user or "").strip()
     return user, pwd
 
 
@@ -123,6 +130,12 @@ def send_batch(
         return [{**r, "success": False, "message": f"SMTP 連線失敗：{str(e)[:50]}"} for r in recipients]
 
     try:
+        from mailer.tracking import gen_tracking_uid, inject_tracking
+        try:
+            from config import TRACKING_BASE_URL
+        except ImportError:
+            TRACKING_BASE_URL = ""
+
         for r in recipients:
             email = r.get("email", "").strip()
             if not email or "@" not in email:
@@ -136,14 +149,21 @@ def send_batch(
             subject = subject_template.format(**ctx)
             body = body_template.format(**ctx)
 
+            # ── 注入追蹤（pixel + 連結改寫）──
+            uid = gen_tracking_uid()
+            body_to_send, is_html_after = inject_tracking(body, uid, TRACKING_BASE_URL, html)
+
             try:
                 msg = MIMEMultipart("alternative")
                 msg["Subject"] = subject
                 msg["From"] = formataddr((sender_name or user, user))
                 msg["To"] = email
+                # Gmail 2024/02 新規：List-Unsubscribe 對 < 5000/日 也是 quality signal
+                msg["List-Unsubscribe"] = f"<mailto:{user}?subject=unsubscribe>"
+                msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
-                mime_type = "html" if html else "plain"
-                msg.attach(MIMEText(body, mime_type, "utf-8"))
+                mime_type = "html" if is_html_after else "plain"
+                msg.attach(MIMEText(body_to_send, mime_type, "utf-8"))
 
                 smtp_conn.sendmail(user, [email], msg.as_string())
                 ok, send_msg = True, "寄送成功"
@@ -165,6 +185,8 @@ def send_batch(
                         status="sent" if ok else "failed",
                         error_message="" if ok else send_msg,
                         template_used=subject_template,
+                        tracking_uid=uid if ok and TRACKING_BASE_URL else "",
+                        body_html=is_html_after,
                     )
                 except Exception as log_err:
                     logger.debug(f"寫入 email_log 失敗：{log_err}")
