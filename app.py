@@ -1337,128 +1337,131 @@ with tab_history:
 with tab_analytics:
     st.markdown("""
     <div class="section-header">
-        <h3>開發信追蹤分析</h3>
-        <span class="desc">以像素與連結追蹤開信 / 點擊，辨識熱門客戶</span>
+        <h3>📈 開發信追蹤分析</h3>
+        <span class="desc">系統在你寄出的每封信裡偷偷塞一張看不見的小圖片 + 把連結改成追蹤連結，客戶打開信或點連結，這邊就會 +1</span>
     </div>
     """, unsafe_allow_html=True)
 
-    from database.db import get_tracking_stats, get_template_stats, get_hot_leads
+    from database.db import get_tracking_stats, get_template_stats, get_hot_leads, get_connection as _gc
     try:
         from config import TRACKING_BASE_URL
     except ImportError:
         TRACKING_BASE_URL = ""
 
+    # ── 系統健康檢查（即時探測追蹤服務是否存活）──
+    _health_ok = False
+    _health_ms = 0
+    if TRACKING_BASE_URL:
+        try:
+            import requests as _rq
+            import time as _t
+            _t0 = _t.time()
+            _resp = _rq.get(f"{TRACKING_BASE_URL}/health", timeout=3)
+            _health_ms = int((_t.time() - _t0) * 1000)
+            _health_ok = _resp.status_code == 200 and _resp.json().get("ok")
+        except Exception as _e:
+            _health_ok = False
+
     if not TRACKING_BASE_URL:
-        st.markdown("""
-        <div class="info-banner">
-            <div>
-                <strong style="color:var(--text-primary)">尚未設定追蹤網址</strong>　<span class="tag">TRACKING_BASE_URL</span><br>
-                於 <span class="tag">.env</span> 加入 <span class="tag">TRACKING_BASE_URL=https://your-domain.com</span> 後重啟，新寄出的信件才會進入下方統計。
+        st.error("🚫 **追蹤服務未設定** — 環境變數 `TRACKING_BASE_URL` 空白，寄出去的信不會被追蹤。")
+    elif _health_ok:
+        st.success(
+            f"✅ **追蹤服務正常運行中**　·　位址 `{TRACKING_BASE_URL}`　·　回應時間 {_health_ms}ms　·　系統有在跑 💯"
+        )
+    else:
+        st.warning(
+            f"⚠️ **追蹤服務失聯** — 已設位址 `{TRACKING_BASE_URL}` 但健康檢查失敗，請檢查 tracking_server 是否在跑。"
+        )
+
+    tstats = get_tracking_stats()
+
+    # ── 大型指標（搭配白話解釋）──
+    st.markdown("### 📊 總覽")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📤 已寄出封數", tstats['sent'],
+              help="系統幫你追蹤的信件總數（真實寄出 + 測試信）")
+    m2.metric("👀 被打開信件數", tstats['opened'],
+              help="有多少封信被收件人點開來看")
+    m3.metric("🔗 有人點連結的信", tstats['clicked'],
+              help="開信之後，還進一步點了信裡連結的人數（最有興趣的客戶）")
+    m4.metric("🔥 熱門客戶數", tstats['hot_leads'],
+              help="只要點擊過任何一封信裡的連結，就會被標記為熱門客戶，可以優先跟進")
+
+    # 比率卡（用白話包裝）
+    if tstats['sent'] > 0:
+        st.markdown(f"""
+        <div style="background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;
+                    padding:14px 18px;border-radius:0 10px 10px 0;margin:12px 0 24px">
+            <div style="font-size:0.95rem;line-height:1.8">
+                寄出的 <b>{tstats['sent']}</b> 封信中，<b style="color:#22c55e">{tstats['opened']}</b> 封被打開（<b>{tstats['open_rate']}%</b> 開信率）、
+                <b style="color:#f59e0b">{tstats['clicked']}</b> 封有人點連結（<b>{tstats['click_rate']}%</b> 點擊率）。<br>
+                <span style="opacity:0.75;font-size:0.85rem">業界平均：冷信開信率 10-20% / 點擊率 1-5%。超過就是不錯的素材。</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown(f"""
-        <div class="info-banner ok">
-            <div>追蹤網址已設定：<span class="tag">{TRACKING_BASE_URL}</span></div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("👇 還沒寄出過任何信。下面教你怎麼驗證系統真的有在跑。")
 
-    tstats = get_tracking_stats()
+    st.divider()
 
-    # Semantic signal: 開信率 > 30% 視為佳；10~30% 普通；< 10% 偏低
-    def _signal(rate: float) -> str:
-        if rate >= 30:
-            return "good"
-        if rate >= 10:
-            return "okay"
-        return "low"
-
-    open_sig = _signal(tstats["open_rate"])
-    click_sig = _signal(tstats["click_rate"] * 3)  # 點擊率基準較低，乘 3 作為等效訊號
-
+    # ── 白話解釋 + 自我驗證（預設展開，不是 expander）──
+    st.markdown("### 🧪 怎麼知道追蹤真的有在跑？")
     st.markdown(f"""
-    <div class="track-metric-row">
-        <div class="track-metric">
-            <div class="tm-label">已追蹤寄出</div>
-            <div class="tm-value">{tstats['sent']}</div>
-            <div class="tm-sub">封信件</div>
-        </div>
-        <div class="track-metric {open_sig}">
-            <span class="tm-signal"></span>
-            <div class="tm-label">開信率</div>
-            <div class="tm-value">{tstats['open_rate']}<span class="tm-suffix">%</span></div>
-            <div class="tm-sub">{tstats['opened']} 人開啟</div>
-        </div>
-        <div class="track-metric {click_sig}">
-            <span class="tm-signal"></span>
-            <div class="tm-label">點擊率</div>
-            <div class="tm-value">{tstats['click_rate']}<span class="tm-suffix">%</span></div>
-            <div class="tm-sub">{tstats['clicked']} 人點擊</div>
-        </div>
-        <div class="track-metric hot">
-            <div class="tm-label">熱門客戶</div>
-            <div class="tm-value">{tstats['hot_leads']}</div>
-            <div class="tm-sub">CTOR {tstats['click_to_open_rate']}%</div>
-        </div>
-    </div>
+<div style="background:rgba(250,204,21,0.06);border:1px solid rgba(250,204,21,0.15);
+            padding:16px 20px;border-radius:12px;line-height:1.9;font-size:0.94rem">
+<b>追蹤原理（3 句話版本）</b><br>
+1️⃣ 寄信時系統在信末塞一張 <b>1x1 像素透明圖</b>（肉眼看不見）<br>
+2️⃣ 客戶打開信件時，他的 Gmail 自動去下載這張圖片 → 系統就知道「被開了」<br>
+3️⃣ 信裡每個連結都被改寫成 <code>{TRACKING_BASE_URL}/t/click/xxx</code> → 有人點就會先經過系統再 302 轉回原網址<br>
+<br>
+<b>驗證 3 步驟</b>：<br>
+A. 到 <b>📨 開發信</b> → 下方「寄測試信」→ 填你自己的 Gmail → 按「寄測試信」（<b>別開 Dry-run</b>）<br>
+B. 回 Gmail 收信 → 打開那封「[測試]」信（<b>Gmail 要允許顯示圖片</b>）<br>
+C. 回這頁按「🔄 刷新」→ 下方「被打開信件數」+1 ✅
+</div>
     """, unsafe_allow_html=True)
 
-    st.caption(
-        f"開信點擊率（CTOR）：{tstats['click_to_open_rate']}% — 開信者中有多少人進一步點擊連結"
-    )
+    if st.button("🔄 刷新統計", use_container_width=False, key="refresh_tracking", type="primary"):
+        st.rerun()
 
-    # ── 自我驗證區：讓使用者能快速測試追蹤真的有在跑 ──
-    with st.expander("🧪 自我驗證追蹤是否正常運作（測試工具）", expanded=(tstats['sent'] == 0)):
-        st.markdown("""
-        **三步驟驗證追蹤有沒有在跑**：
-        1. 切到 **📨 開發信** → 下方「寄測試信」區填你的 Gmail → 按「寄測試信」（不要開 Dry-run）
-        2. 到 Gmail 收信 → **打開那封測試信**（圖片要顯示）→ 系統會自動記錄 open 事件
-        3. 按下方的「🔄 重新整理」，看「開信率」是否增加
-        """)
-        from database.db import get_connection as _gc
-        _conn = _gc()
-        _test_rows = _conn.execute("""
-            SELECT sent_at, recipient_email, subject, tracking_uid
-            FROM email_logs
-            WHERE status='test' AND tracking_uid IS NOT NULL AND tracking_uid != ''
-            ORDER BY sent_at DESC LIMIT 5
-        """).fetchall()
+    # ── 最近測試信清單 ──
+    _conn = _gc()
+    _test_rows = _conn.execute("""
+        SELECT sent_at, recipient_email, subject, tracking_uid
+        FROM email_logs
+        WHERE status='test' AND tracking_uid IS NOT NULL AND tracking_uid != ''
+        ORDER BY sent_at DESC LIMIT 5
+    """).fetchall()
 
-        if _test_rows:
-            st.markdown("**最近 5 封測試信**")
-            for _r in _test_rows:
-                _uid = _r["tracking_uid"]
-                _opened = _conn.execute(
-                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='open'",
-                    (_uid,),
-                ).fetchone()[0]
-                _clicked = _conn.execute(
-                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='click'",
-                    (_uid,),
-                ).fetchone()[0]
-                _status = "✅ 已開啟" if _opened else "⏳ 尚未開啟"
-                cA, cB, cC = st.columns([3, 2, 2])
-                cA.markdown(
-                    f"`{_r['sent_at'][:16].replace('T',' ')}` → {_r['recipient_email']}  \n"
-                    f"_uid_: `{_uid[:12]}…`  ·  {_status}  ·  點擊 {_clicked} 次"
-                )
-                # 模擬開啟（手動觸發，方便沒在 Gmail 的人驗證 pipeline）
-                if cB.button("🖼 模擬「開啟」", key=f"sim_open_{_uid}", use_container_width=True):
-                    from database.db import record_email_event
-                    record_email_event(_uid, "open", user_agent="self-test",
-                                        ip_hash="local")
-                    st.toast("已寫入 open 事件，按刷新看結果", icon="🎯")
-                if cC.button("🔗 模擬「點擊」", key=f"sim_click_{_uid}", use_container_width=True):
-                    from database.db import record_email_event
-                    record_email_event(_uid, "click", target_url="self-test",
-                                        user_agent="self-test", ip_hash="local")
-                    st.toast("已寫入 click 事件，按刷新看結果", icon="🎯")
-        else:
-            st.info("目前還沒有測試信。先去「📨 開發信」下方寄一封測試信給自己。")
-
-        if st.button("🔄 重新整理統計", use_container_width=True, key="refresh_tracking"):
-            st.rerun()
+    if _test_rows:
+        st.markdown("#### 🧾 最近 5 封測試信")
+        st.caption("如果你沒辦法去 Gmail 收信，可以按「模擬」按鈕直接寫一筆事件進資料庫，驗證整條 pipeline 走得通。")
+        for _r in _test_rows:
+            _uid = _r["tracking_uid"]
+            _opened = _conn.execute(
+                "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='open'",
+                (_uid,),
+            ).fetchone()[0]
+            _clicked = _conn.execute(
+                "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='click'",
+                (_uid,),
+            ).fetchone()[0]
+            _dot = "🟢" if _opened else "⚪"
+            cA, cB, cC = st.columns([4, 2, 2])
+            cA.markdown(
+                f"{_dot} `{_r['sent_at'][:16].replace('T',' ')}` → **{_r['recipient_email']}**  \n"
+                f"開信 <b>{_opened}</b> 次　·　點擊 <b>{_clicked}</b> 次",
+                unsafe_allow_html=True,
+            )
+            if cB.button("🖼 模擬開啟", key=f"sim_open_{_uid}", use_container_width=True):
+                from database.db import record_email_event
+                record_email_event(_uid, "open", user_agent="self-test", ip_hash="local")
+                st.rerun()
+            if cC.button("🔗 模擬點擊", key=f"sim_click_{_uid}", use_container_width=True):
+                from database.db import record_email_event
+                record_email_event(_uid, "click", target_url="self-test",
+                                   user_agent="self-test", ip_hash="local")
+                st.rerun()
 
     st.markdown("""
     <div class="section-header">
