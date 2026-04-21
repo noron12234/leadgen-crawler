@@ -58,9 +58,16 @@ for key, default in [
     ("last_run_error", None),
     ("last_run_duration", None),
     ("estimated_total", None),
+    ("_crawling", False),
+    ("_crawl_latch", False),      # 爬蟲剛結束：下一輪 rerun 仍 disable 按鈕以吸收 queued clicks
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+# Latch 判斷：若上一輪 run 是在爬蟲，這一輪的按鈕仍 disable（吸收 queued clicks）
+_absorb_queued_clicks = bool(st.session_state.get("_crawl_latch", False))
+if _absorb_queued_clicks:
+    st.session_state["_crawl_latch"] = False  # 用完即清
 
 
 # ══════════════════════════════════════════════════════
@@ -166,6 +173,16 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            # 同步更新進度條文字（讓秒數在長時間階段內持續走動）
+            _elapsed = time.time() - started_at
+            _virt = step - 0.5
+            _pct = max(2, min(99, int(_virt / total_phases * 100)))
+            _eta_txt = ""
+            if _elapsed > 1:
+                _avg = _elapsed / max(step, 1)
+                _rem = max(0, _avg * (total_phases - step + 1))
+                _eta_txt = f" · 預估剩餘 {int(_rem)} 秒"
+            progress.progress(_pct, text=f"{_pct}%　·　已跑 {int(_elapsed)} 秒{_eta_txt}")
 
         r104 = crawl_snack_companies(areas=[area], max_pages=max_pages, delay=0.4,
                                       progress_callback=_on_company)
@@ -305,7 +322,7 @@ with st.sidebar:
     _crawl_btn_clicked = st.button(
         "🚀 開始抓取" if not _crawl_locked_by_other else "⏳ 其他人正在爬蟲",
         type="primary", use_container_width=True, key="btn_crawl",
-        disabled=_crawl_locked_by_other,
+        disabled=_crawl_locked_by_other or _absorb_queued_clicks,
     )
 
     if _crawl_btn_clicked:
@@ -314,6 +331,7 @@ with st.sidebar:
         if not ok:
             st.error(f"無法開始：{msg}")
         else:
+            st.session_state["_crawling"] = True
             try:
                 with st.status("⚙️ 執行中…", expanded=False) as status:
                     result = run_crawlers(
@@ -338,6 +356,8 @@ with st.sidebar:
                 st.toast(f"❌ 爬蟲失敗：{str(e)[:80]}", icon="⚠️")
             finally:
                 release_lock("crawl", _me)
+                st.session_state["_crawling"] = False
+                st.session_state["_crawl_latch"] = True  # 下一輪繼續 disable 按鈕
             st.rerun()
 
     # ── 持久狀態卡：離開電腦回來也能看到上次結果 ──
@@ -374,7 +394,9 @@ with st.sidebar:
     st.divider()
 
     # ── 預估 ──
-    if st.button("預估可爬數量", use_container_width=True, key="btn_estimate"):
+    _sidebar_disabled = _absorb_queued_clicks or bool(_crawl_holder)
+    if st.button("預估可爬數量", use_container_width=True, key="btn_estimate",
+                 disabled=_sidebar_disabled):
         with st.spinner("查詢中..."):
             est = fetch_estimated_total(area_code)
             st.session_state.estimated_total = est
@@ -422,7 +444,8 @@ with st.sidebar:
     # ── 工具 ──
     st.markdown('<p class="sidebar-section">輔助工具</p>', unsafe_allow_html=True)
 
-    if st.button("驗證 Email（DNS）", use_container_width=True, key="btn_verify"):
+    if st.button("驗證 Email（DNS）", use_container_width=True, key="btn_verify",
+                 disabled=_sidebar_disabled):
         from database.db import get_all_companies
         from processors.email_verifier import verify_all
         clist = get_all_companies()
@@ -439,7 +462,8 @@ with st.sidebar:
             st.session_state["email_verify_result"] = verified
 
     if st.button("官網 Email 補充", use_container_width=True, key="btn_scan_web",
-                 help="掃描有官網但沒 email 的公司首頁"):
+                 help="掃描有官網但沒 email 的公司首頁",
+                 disabled=_sidebar_disabled):
         from processors.website_email_scanner import scan_and_update_db
         with st.spinner("掃描官網中..."):
             result = scan_and_update_db(max_workers=5)
