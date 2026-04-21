@@ -402,7 +402,10 @@ def log_email_sent(
     body_html: bool = False,
     sent_by: str = "",
 ) -> int:
-    """記錄一筆寄信 log，回傳 email_log id（供追蹤用）"""
+    """記錄一筆寄信 log，回傳 email_log id（供追蹤用）
+    status: 'sent' | 'failed' | 'dry_run' | 'test'
+    - dry_run / test 時 company_id 可為 0（非真實客戶）
+    """
     init_db()
     now = datetime.now().isoformat()
     conn = get_connection()
@@ -411,7 +414,7 @@ def log_email_sent(
         (company_id, recipient_email, subject, sent_at, status,
          error_message, template_used, tracking_uid, body_html, sent_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (company_id, recipient_email, subject, now, status,
+    """, (company_id or 0, recipient_email, subject, now, status,
           error_message, template_used, tracking_uid,
           1 if body_html else 0, sent_by))
     conn.commit()
@@ -608,7 +611,7 @@ def get_tracking_stats() -> dict:
     init_db()
     conn = get_connection()
     sent = conn.execute(
-        "SELECT COUNT(*) FROM email_logs WHERE status='sent' AND tracking_uid IS NOT NULL AND tracking_uid != ''"
+        "SELECT COUNT(*) FROM email_logs WHERE status IN ('sent','test') AND tracking_uid IS NOT NULL AND tracking_uid != ''"
     ).fetchone()[0]
     opened = conn.execute("""
         SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='open'

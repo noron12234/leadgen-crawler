@@ -1132,23 +1132,34 @@ with tab_email:
 
             def _do_send(to_email, subj, body, cid, cust_name, tpl):
                 """實際寄信。
-                - 測試信 (cid=None) 也會注入 pixel / 改寫連結 / 寫 log（讓追蹤可驗證）
-                - Dry-run 模式 → 不實際寄
+                - 真實寄 (cid truthy)：注入追蹤 → 寄 → log status='sent'
+                - 測試信 (cid=None)：注入追蹤 → 真的寄給自己 → log status='test'（算進追蹤分析讓使用者驗證追蹤正常）
+                - Dry-run：不真的寄 → log status='dry_run'（顯示在歷史紀錄但標記為模擬）
                 """
-                # Dry-run：不真的寄
+                from database.db import log_activity, log_email_sent, mark_contacted
+                from mailer.tracking import gen_tracking_uid, inject_tracking
+                try:
+                    from config import TRACKING_BASE_URL
+                except ImportError:
+                    TRACKING_BASE_URL = ""
+                _username = st.session_state.get("username", "")
+
+                # Dry-run：不真的寄，但寫 log 讓使用者看得到
                 if st.session_state.get("dry_run_mode", False):
-                    return True, f"[Dry-run] 假裝寄給 {to_email}（未實際寄出）"
+                    log_email_sent(
+                        company_id=cid or 0, recipient_email=to_email,
+                        subject=f"[模擬] {subj}", status="dry_run", template_used=tpl,
+                        tracking_uid="", sent_by=_username,
+                    )
+                    log_activity(_username, "dry_run_send",
+                                 f"[模擬] 寄給 {cust_name or to_email}")
+                    return True, f"🧪 [Dry-run] 模擬寄出成功 → {to_email}（未實際寄信，已寫入歷史紀錄）"
 
                 import os
                 os.environ["GMAIL_USER"]         = st.session_state.get("gmail_user", "")
                 os.environ["GMAIL_APP_PASSWORD"]  = st.session_state.get("gmail_pwd", "")
 
                 # 注入追蹤 pixel + 連結改寫（所有信都要，測試信也要）
-                from mailer.tracking import gen_tracking_uid, inject_tracking
-                try:
-                    from config import TRACKING_BASE_URL
-                except ImportError:
-                    TRACKING_BASE_URL = ""
                 uid = gen_tracking_uid() if TRACKING_BASE_URL else ""
                 body_to_send, is_html = inject_tracking(body, uid, TRACKING_BASE_URL, is_html=False)
 
@@ -1159,12 +1170,9 @@ with tab_email:
                     sender_name=st.session_state.get("sender_name", "業務部門"),
                     html=is_html,
                 )
-                _username = st.session_state.get("username", "")
                 if ok:
-                    from database.db import log_activity
-                    # 真實寄給客戶 → 寫 email_logs + 標記已聯繫
                     if cid:
-                        from database.db import log_email_sent, mark_contacted
+                        # 真實寄給客戶
                         log_email_sent(
                             company_id=cid, recipient_email=to_email,
                             subject=subj, status="sent", template_used=tpl,
@@ -1174,9 +1182,21 @@ with tab_email:
                         log_activity(_username, "send_email",
                                      f"寄給 {cust_name or to_email}")
                     else:
-                        # 測試信 → 寫活動 log 方便看追蹤
-                        log_activity(_username, "send_email",
+                        # 測試信寄給自己 → 也寫 email_logs 讓追蹤分析能看到，方便自驗
+                        log_email_sent(
+                            company_id=0, recipient_email=to_email,
+                            subject=f"[測試] {subj}", status="test",
+                            template_used=tpl, tracking_uid=uid, sent_by=_username,
+                        )
+                        log_activity(_username, "send_test_email",
                                      f"[測試] 寄給 {to_email}（追蹤 uid={uid[:8]}）")
+                else:
+                    # 失敗也寫 log
+                    log_email_sent(
+                        company_id=cid or 0, recipient_email=to_email,
+                        subject=subj, status="failed", error_message=msg[:200],
+                        template_used=tpl, tracking_uid=uid, sent_by=_username,
+                    )
                 return ok, msg
 
             with bc1:
@@ -1263,36 +1283,55 @@ with tab_history:
 
     from database.db import get_email_logs, get_email_log_stats
 
-    log_stats = get_email_log_stats()
-    if log_stats["total"] == 0:
+    logs_all = get_email_logs(limit=200)
+    real_logs = [l for l in logs_all if l.get("status") in ("sent", "failed")]
+    test_logs = [l for l in logs_all if l.get("status") == "test"]
+    dry_logs = [l for l in logs_all if l.get("status") == "dry_run"]
+
+    if not logs_all:
         st.markdown("""
         <div class="empty-state">
             <div class="icon">📬</div>
             <h3>還沒寄出過信件</h3>
             <p>切到「開發信」分頁、挑選名單、按下寄送後，紀錄會自動出現在這裡</p>
-            <span class="hint">支援 SMTP / Gmail API</span>
+            <span class="hint">Dry-run 模擬、測試信、正式寄送都會在這裡顯示</span>
         </div>
         """, unsafe_allow_html=True)
     else:
-        lcol1, lcol2, lcol3 = st.columns(3)
-        lcol1.metric("總寄出", log_stats["total"])
-        lcol2.metric("成功", log_stats["sent"])
-        lcol3.metric("失敗", log_stats["failed"])
+        lcol1, lcol2, lcol3, lcol4 = st.columns(4)
+        lcol1.metric("📧 正式寄出",
+                     sum(1 for l in real_logs if l.get("status") == "sent"))
+        lcol2.metric("❌ 寄送失敗",
+                     sum(1 for l in real_logs if l.get("status") == "failed"))
+        lcol3.metric("🧪 測試信", len(test_logs))
+        lcol4.metric("🎭 Dry-run 模擬", len(dry_logs))
 
-        logs = get_email_logs(limit=50)
-        if logs:
+        _show_test = st.checkbox("顯示測試信", value=True, key="hist_show_test")
+        _show_dry = st.checkbox("顯示 Dry-run 模擬", value=True, key="hist_show_dry")
+
+        _status_label = {"sent": "✅ 正式", "failed": "❌ 失敗", "test": "🧪 測試", "dry_run": "🎭 模擬"}
+        _filtered = [
+            l for l in logs_all
+            if l.get("status") in ("sent", "failed")
+            or (l.get("status") == "test" and _show_test)
+            or (l.get("status") == "dry_run" and _show_dry)
+        ]
+        if _filtered:
             log_df = pd.DataFrame([
                 {
                     "時間": (log.get("sent_at") or "")[:16].replace("T", " "),
-                    "公司": log.get("cust_name") or f"ID:{log.get('company_id')}",
+                    "類型": _status_label.get(log.get("status"), log.get("status", "")),
+                    "公司": log.get("cust_name") or ("—" if not log.get("company_id") else f"ID:{log.get('company_id')}"),
                     "收件人": log.get("recipient_email", ""),
                     "主旨": log.get("subject", "")[:40],
-                    "狀態": "✅" if log.get("status") == "sent" else "❌",
+                    "寄件者": log.get("sent_by") or "—",
                     "錯誤訊息": log.get("error_message") or "",
                 }
-                for log in logs
+                for log in _filtered
             ])
-            st.dataframe(log_df, use_container_width=True, height=350, hide_index=True)
+            st.dataframe(log_df, use_container_width=True, height=400, hide_index=True)
+        else:
+            st.info("沒有符合條件的紀錄")
 
 # ── TAB 5：追蹤分析（需求規格） ──
 with tab_analytics:
@@ -1368,6 +1407,58 @@ with tab_analytics:
     st.caption(
         f"開信點擊率（CTOR）：{tstats['click_to_open_rate']}% — 開信者中有多少人進一步點擊連結"
     )
+
+    # ── 自我驗證區：讓使用者能快速測試追蹤真的有在跑 ──
+    with st.expander("🧪 自我驗證追蹤是否正常運作（測試工具）", expanded=(tstats['sent'] == 0)):
+        st.markdown("""
+        **三步驟驗證追蹤有沒有在跑**：
+        1. 切到 **📨 開發信** → 下方「寄測試信」區填你的 Gmail → 按「寄測試信」（不要開 Dry-run）
+        2. 到 Gmail 收信 → **打開那封測試信**（圖片要顯示）→ 系統會自動記錄 open 事件
+        3. 按下方的「🔄 重新整理」，看「開信率」是否增加
+        """)
+        from database.db import get_connection as _gc
+        _conn = _gc()
+        _test_rows = _conn.execute("""
+            SELECT sent_at, recipient_email, subject, tracking_uid
+            FROM email_logs
+            WHERE status='test' AND tracking_uid IS NOT NULL AND tracking_uid != ''
+            ORDER BY sent_at DESC LIMIT 5
+        """).fetchall()
+
+        if _test_rows:
+            st.markdown("**最近 5 封測試信**")
+            for _r in _test_rows:
+                _uid = _r["tracking_uid"]
+                _opened = _conn.execute(
+                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='open'",
+                    (_uid,),
+                ).fetchone()[0]
+                _clicked = _conn.execute(
+                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='click'",
+                    (_uid,),
+                ).fetchone()[0]
+                _status = "✅ 已開啟" if _opened else "⏳ 尚未開啟"
+                cA, cB, cC = st.columns([3, 2, 2])
+                cA.markdown(
+                    f"`{_r['sent_at'][:16].replace('T',' ')}` → {_r['recipient_email']}  \n"
+                    f"_uid_: `{_uid[:12]}…`  ·  {_status}  ·  點擊 {_clicked} 次"
+                )
+                # 模擬開啟（手動觸發，方便沒在 Gmail 的人驗證 pipeline）
+                if cB.button("🖼 模擬「開啟」", key=f"sim_open_{_uid}", use_container_width=True):
+                    from database.db import record_email_event
+                    record_email_event(_uid, "open", user_agent="self-test",
+                                        ip_hash="local")
+                    st.toast("已寫入 open 事件，按刷新看結果", icon="🎯")
+                if cC.button("🔗 模擬「點擊」", key=f"sim_click_{_uid}", use_container_width=True):
+                    from database.db import record_email_event
+                    record_email_event(_uid, "click", target_url="self-test",
+                                        user_agent="self-test", ip_hash="local")
+                    st.toast("已寫入 click 事件，按刷新看結果", icon="🎯")
+        else:
+            st.info("目前還沒有測試信。先去「📨 開發信」下方寄一封測試信給自己。")
+
+        if st.button("🔄 重新整理統計", use_container_width=True, key="refresh_tracking"):
+            st.rerun()
 
     st.markdown("""
     <div class="section-header">
