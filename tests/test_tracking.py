@@ -148,6 +148,19 @@ class TestTrackingDb:
         assert stats["open_rate"] == 100.0
         assert stats["hot_leads"] == 0  # 還沒點擊
 
+    def test_open_by_enterprise_scanner_is_ignored(self, tmp_db, sample_companies):
+        """企業反釣魚掃描器（Proofpoint）的 open 不應被記為真實開信"""
+        from database.db import record_email_event, get_tracking_stats
+        _, uid = self._seed_email(sample_companies)
+
+        record_email_event(uid, "open",
+                           user_agent="Mozilla/5.0 (compatible; Proofpoint-LinkScanner/1.0)")
+        assert get_tracking_stats()["opened"] == 0  # 被過濾
+
+        record_email_event(uid, "open",
+                           user_agent="Mozilla/5.0 (via GoogleImageProxy)")
+        assert get_tracking_stats()["opened"] == 1  # Gmail proxy 現在算開信（業界慣例）
+
     def test_click_event_marks_hot_lead(self, tmp_db, sample_companies):
         from database.db import record_email_event, get_tracking_stats, get_hot_leads
         cid, uid = self._seed_email(sample_companies)

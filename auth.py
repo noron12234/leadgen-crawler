@@ -439,21 +439,8 @@ def check_auth() -> bool:
             except Exception:
                 pass
 
-        with st.sidebar:
-            st.markdown(
-                f"""
-                <div style="padding: 8px 12px; background: rgba(34,197,94,0.08);
-                            border-left: 3px solid #22c55e; border-radius: 0 6px 6px 0;
-                            margin-bottom: 10px;">
-                    <div style="font-size: 0.7rem; opacity: 0.5;">目前使用者</div>
-                    <div style="font-size: 0.9rem; font-weight: 700;">
-                        {st.session_state.get('name', '')}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            authenticator.logout("登出", key="logout_btn")
+        # 登出按鈕改由 app.py 的 topnav 呼叫（見 render_user_chip）
+        st.session_state["_authenticator"] = authenticator
         return True
 
     # 未登入 → 顯示封面 + 登入表單

@@ -503,7 +503,7 @@ def get_user_email_breakdown() -> list[dict]:
         SELECT
             COALESCE(NULLIF(el.sent_by, ''), '（未標記）') AS username,
             COUNT(*) AS sent,
-            COUNT(DISTINCT CASE WHEN ev.event_type='open'  THEN el.tracking_uid END) AS opened,
+            COUNT(DISTINCT CASE WHEN ev.event_type IN ('open','click') THEN el.tracking_uid END) AS opened,
             COUNT(DISTINCT CASE WHEN ev.event_type='click' THEN el.tracking_uid END) AS clicked
         FROM email_logs el
         LEFT JOIN email_events ev ON ev.tracking_uid = el.tracking_uid
@@ -588,6 +588,27 @@ def clear_all():
 # 開發信追蹤（需求規格）
 # ══════════════════════════════════════════════════════
 
+# 只擋「確定是掃描器」的 UA（企業反釣魚產品），這類不代表有人看信。
+# 不擋 Gmail / Outlook image proxy — 因為它們 cache 住所有圖片載入，
+# 擋了會讓正常使用者打開信也偵測不到（多數郵件服務用這種 proxy 架構）。
+# 代價：pre-fetch 會造成「寄出後幾秒就標開信」— 可接受，業界標準行為。
+_SCANNER_UA_PATTERNS = (
+    "proofpoint",
+    "mimecast",
+    "barracuda",
+    "symantec",
+    "sophos",
+    "trendmicro",
+)
+
+
+def _is_scanner_ua(user_agent: str) -> bool:
+    if not user_agent:
+        return False
+    ua = user_agent.lower()
+    return any(p in ua for p in _SCANNER_UA_PATTERNS)
+
+
 def record_email_event(
     tracking_uid: str,
     event_type: str,
@@ -598,12 +619,21 @@ def record_email_event(
     """
     記錄一筆開信/點擊事件，並在必要時將該公司標記為熱門客戶。
     event_type: 'open' | 'click'
+
+    只會過濾企業反釣魚掃描器（Proofpoint / Mimecast 等）的 UA，其餘都記。
+    Gmail / Outlook 的 image proxy 會把 open pixel 提早觸發，接受這個誤差 —
+    業界郵件追蹤工具都這樣做。
     """
     if event_type not in ("open", "click"):
         return
     init_db()
     conn = get_connection()
     now = datetime.now().isoformat()
+
+    if event_type == "open" and _is_scanner_ua(user_agent):
+        logger.info(f"略過反釣魚掃描器 open: uid={tracking_uid[:8]} ua={user_agent[:60]}")
+        return
+
     conn.execute("""
         INSERT INTO email_events (tracking_uid, event_type, occurred_at, target_url, user_agent, ip_hash)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -622,14 +652,18 @@ def record_email_event(
 def get_tracking_stats() -> dict:
     """
     整體追蹤統計：開信率、點擊率、熱門客戶數
+    （點了連結視同打開過 — Gmail 某些情境 pixel 會被擋但連結仍可追，
+      或客戶先關圖片再點連結，都仍應算「看過信」）
     """
     init_db()
     conn = get_connection()
     sent = conn.execute(
         "SELECT COUNT(*) FROM email_logs WHERE status IN ('sent','test') AND tracking_uid IS NOT NULL AND tracking_uid != ''"
     ).fetchone()[0]
+    # 打開 = 有 open 事件 OR 有 click 事件（點連結也算看過信）
     opened = conn.execute("""
-        SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='open'
+        SELECT COUNT(DISTINCT tracking_uid) FROM email_events
+        WHERE event_type IN ('open','click')
     """).fetchone()[0]
     clicked = conn.execute("""
         SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='click'
@@ -659,7 +693,8 @@ def get_template_stats() -> list[dict]:
             COALESCE(NULLIF(template_used, ''), '（未分類）') AS template,
             COUNT(*) AS sent,
             SUM(CASE WHEN EXISTS (
-                SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid AND ev.event_type='open'
+                SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid
+                  AND ev.event_type IN ('open','click')
             ) THEN 1 ELSE 0 END) AS opened,
             SUM(CASE WHEN EXISTS (
                 SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid AND ev.event_type='click'

@@ -8,16 +8,27 @@
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
 
 :root {
-    --accent:     #3b82f6;
-    --accent-dim: rgba(59,130,246,0.15);
+    /* Linear / Attio CRM palette */
+    --accent:     #6366f1;           /* Indigo 500 — primary action */
+    --accent-dim: rgba(99,102,241,0.15);
+    --accent-2:   #818cf8;           /* Indigo 400 — hover / gradient */
     --green:      #22c55e;
     --yellow:     #f59e0b;
     --red:        #ef4444;
-    --border:     rgba(255,255,255,0.10);
-    --border-md:  rgba(255,255,255,0.18);
-    --card-bg:    rgba(255,255,255,0.055);
-    --radius:     16px;
-    --radius-sm:  10px;
+    /* Surfaces — 窄邊框、深分層 */
+    --bg-0:       #09090b;           /* page bg */
+    --bg-1:       #0c0c0f;           /* raised card */
+    --bg-2:       #111114;           /* nested card */
+    --border:     #1f1f23;           /* hairline */
+    --border-md:  #2a2a30;           /* stronger hairline (hover) */
+    --card-bg:    #0c0c0f;
+    /* Text */
+    --text-hi:    #fafafa;           /* high */
+    --text-md:    #a1a1aa;           /* mid (zinc-400) */
+    --text-lo:    #71717a;           /* low (zinc-500) */
+    /* Shape */
+    --radius:     10px;
+    --radius-sm:  8px;
     --radius-xs:  6px;
     --ease-out:   cubic-bezier(0.22,1,0.36,1);
     --ease-spring:cubic-bezier(0.34,1.56,0.64,1);
@@ -34,6 +45,19 @@ header[data-testid="stHeader"] {
     backdrop-filter: blur(20px) !important;
     border-bottom: 1px solid var(--border) !important;
 }
+
+/* ── Sidebar 完全隱藏（改為主畫面 SaaS 架構） ── */
+section[data-testid="stSidebar"],
+div[data-testid="stSidebarCollapseButton"],
+button[data-testid="stSidebarCollapseButton"],
+button[data-testid="collapsedControl"] {
+    display: none !important;
+    width: 0 !important;
+    visibility: hidden !important;
+}
+/* 主內容區：移除 sidebar 留下的左側空白 */
+[data-testid="stAppViewContainer"] > section:first-of-type { margin-left: 0 !important; }
+[data-testid="stMainBlockContainer"] { padding-top: 1.5rem !important; max-width: 1320px; }
 
 /* ════════════════════════════════════════════════════════
    AURORA BACKGROUND
@@ -95,57 +119,152 @@ header[data-testid="stHeader"] {
 }
 
 /* ════════════════════════════════════════════════════════
-   SIDEBAR BRAND
+   TOP NAV — SaaS 品牌列 + 使用者 chip
    ════════════════════════════════════════════════════════ */
-.sidebar-brand {
-    padding: 20px 0 24px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 20px;
+.topnav-brand {
+    display: flex; align-items: center; gap: 14px;
+    padding: 4px 0 12px;
 }
-.sidebar-brand .logo-mark {
-    width: 48px; height: 48px;
-    background: #fff;
-    border-radius: 14px;
+.topnav-logo {
+    width: 40px; height: 40px;
+    background: #fff; border-radius: 12px;
     display: inline-flex; align-items: center; justify-content: center;
-    font-size: 1.1rem; font-weight: 900; color: #0a0a0a;
-    margin-bottom: 12px;
+    font-size: 0.95rem; font-weight: 900; color: #0a0a0a;
+    flex-shrink: 0;
     transition: transform 200ms var(--ease-spring);
+    box-shadow: 0 4px 14px rgba(255,255,255,0.08);
 }
-.sidebar-brand .logo-mark:hover { transform: scale(1.05); }
-.sidebar-brand .name    { font-size: 1.15rem; font-weight: 800; letter-spacing: -0.03em; }
-.sidebar-brand .tagline { font-size: 0.68rem; opacity: 0.4; letter-spacing: 0.06em; text-transform: uppercase; margin-top: 4px; }
-.sidebar-section { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em; opacity: 0.4; margin: 24px 0 10px; }
+.topnav-logo:hover { transform: scale(1.05) rotate(-2deg); }
+.topnav-title { display: flex; flex-direction: column; line-height: 1.15; }
+.topnav-name  { font-size: 1.15rem; font-weight: 800; letter-spacing: -0.03em; color: #f5f5f5; }
+.topnav-tag   { font-size: 0.7rem; opacity: 0.4; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px; }
+
+/* Chips：在線人數 / 使用者 */
+.topnav-chip {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 6px 12px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    font-size: 0.78rem;
+    transition: border-color 200ms, background 200ms;
+    height: 44px;
+    box-sizing: border-box;
+}
+.topnav-chip:hover { border-color: var(--border-md); background: rgba(255,255,255,0.08); }
+.topnav-chip.online { color: #86efac; cursor: help; }
+.topnav-chip.user { padding-right: 14px; }
+.topnav-avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    color: #fff; font-weight: 800; font-size: 0.82rem;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.topnav-user-meta { display: flex; flex-direction: column; line-height: 1.15; }
+.topnav-user-name { font-size: 0.82rem; font-weight: 700; color: #f5f5f5; }
+.topnav-user-role { font-size: 0.68rem; opacity: 0.5; }
+
+/* topnav 右側的按鈕（登出）— 用 .logout-slot anchor 定位 */
+.logout-slot { display: none; }
+.logout-slot ~ .stElementContainer .stButton > button,
+div:has(> .logout-slot) .stButton > button {
+    height: 44px !important;
+    border-radius: 100px !important;
+    border: 1px solid var(--border-md) !important;
+    background: var(--card-bg) !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    transition: background 150ms, border-color 150ms, color 150ms !important;
+}
+.logout-slot ~ .stElementContainer .stButton > button:hover,
+div:has(> .logout-slot) .stButton > button:hover {
+    background: rgba(239,68,68,0.08) !important;
+    border-color: rgba(239,68,68,0.4) !important;
+    color: #fca5a5 !important;
+}
+
+/* 全站 focus ring（ui-ux-pro-max: accessibility CRITICAL） */
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+a:focus-visible {
+    outline: 2px solid var(--accent) !important;
+    outline-offset: 2px !important;
+    border-radius: 4px;
+}
 
 /* ════════════════════════════════════════════════════════
-   BUTTONS
+   HERO — 工作台主題欄
    ════════════════════════════════════════════════════════ */
-/* Primary — white pill */
-[data-testid="stBaseButton-primary"],
-button[kind="primary"],
-[data-testid="stBaseButton-primary"] p,
-[data-testid="stBaseButton-primary"] span {
-    background: #ffffff !important;
-    color: #0a0a0a !important;
-    border: none !important;
-    border-radius: 100px !important;
-    font-weight: 700 !important;
-    font-size: 0.88rem !important;
-    padding: 0.55rem 1.4rem !important;
-    transition: transform 150ms var(--ease-out), box-shadow 150ms !important;
+.hero-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 8px 0 20px;
 }
-[data-testid="stBaseButton-primary"]:hover {
-    transform: translateY(-2px) scale(1.02) !important;
-    box-shadow: 0 8px 28px rgba(255,255,255,0.18) !important;
+.hero-copy { animation: fadeIn 400ms var(--ease-out); padding-bottom: 8px; }
+.hero-copy h1 {
+    font-size: 2.2rem;
+    font-weight: 800;
+    letter-spacing: -0.045em;
+    line-height: 1.15;
+    margin: 0 0 6px;
+    background: linear-gradient(135deg, #fff 0%, #d4d4d8 60%, #a1a1aa 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
-[data-testid="stBaseButton-primary"]:active { transform: scale(0.97) !important; }
+.hero-copy p {
+    font-size: 0.88rem; opacity: 0.55; margin: 0;
+    display: flex; align-items: center; gap: 8px;
+}
 
-/* Secondary */
-[data-testid="stBaseButton-secondary"] {
-    border-radius: 100px !important;
-    font-size: 0.84rem !important;
-    transition: border-color 150ms, opacity 150ms !important;
+/* ════════════════════════════════════════════════════════
+   CONTROL PANEL — 爬蟲控制台
+   ════════════════════════════════════════════════════════ */
+.ctrl-title {
+    font-size: 0.78rem; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    opacity: 0.6;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
 }
-[data-testid="stBaseButton-secondary"]:hover { opacity: 0.8 !important; }
+.ctrl-subhead {
+    font-size: 0.68rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    opacity: 0.5;
+    margin: 0 0 6px;
+}
+.ctrl-lock {
+    background: rgba(245,158,11,0.08);
+    border-left: 3px solid var(--yellow);
+    padding: 10px 14px;
+    border-radius: 0 8px 8px 0;
+    font-size: 0.82rem;
+    margin: 10px 0;
+}
+.ctrl-lock-meta { display: block; opacity: 0.55; font-size: 0.74rem; margin-top: 2px; }
+
+/* 在線使用者 pill 列（主畫面） */
+.online-wrap {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    font-size: 0.76rem; opacity: 0.8;
+}
+.online-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(34,197,94,0.08);
+    border: 1px solid rgba(34,197,94,0.22);
+    border-radius: 100px;
+    padding: 3px 10px;
+    font-size: 0.74rem;
+    color: #f5f5f5;
+}
+.online-pill.me { background: rgba(251,191,36,0.10); border-color: rgba(251,191,36,0.3); color: #fbbf24; font-weight: 600; }
+
+/* ════════════════════════════════════════════════════════
+   BUTTONS — 由檔尾的 CRM Override 控制
+   ════════════════════════════════════════════════════════ */
 
 /* ════════════════════════════════════════════════════════
    APP HEADER
@@ -244,6 +363,32 @@ button[kind="primary"],
 }
 .section-header h3 { margin: 0; font-size: 1rem; font-weight: 700; }
 .section-header .desc { font-size: 0.78rem; opacity: 0.45; }
+.section-header .section-sub { font-size: 0.78rem; opacity: 0.55; margin-left: 8px; }
+.section-header p.section-sub { margin: 4px 0 0 0; font-size: 0.8rem; opacity: 0.55; line-height: 1.5; }
+.section-header { flex-wrap: wrap; }
+.section-header h3 + p.section-sub { flex-basis: 100%; }
+
+/* 寄信成效 — 分區標題 */
+.analytics-section-title {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.95rem; font-weight: 600;
+    margin: 18px 0 10px;
+    color: var(--text-hi);
+}
+.analytics-section-title .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block;
+}
+.analytics-section-title .dot-gray  { background: #6b7280; }
+.analytics-section-title .dot-blue  { background: #3b82f6; }
+.analytics-section-title .dot-green { background: #22c55e; }
+.analytics-section-title .count-pill {
+    font-size: 0.72rem; font-weight: 500;
+    padding: 2px 8px; border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+    color: var(--text-md);
+    margin-left: 4px;
+}
 .badge {
     font-size: 0.7rem; font-weight: 600;
     background: var(--accent-dim);
@@ -457,4 +602,333 @@ hr { border-color: var(--border) !important; }
     display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: var(--green); box-shadow: 0 0 0 0 rgba(34,197,94,0.4);
     animation: pulse 2s ease-in-out infinite; margin-right: 6px; vertical-align: middle;
+}
+
+/* ════════════════════════════════════════════════════════
+   ▓▓▓ CRM THEME OVERRIDE (Linear / Attio / Close 風格) ▓▓▓
+   放在檔尾覆蓋前述舊規則；改走扁平、窄邊框、小字、弱對比
+   ════════════════════════════════════════════════════════ */
+
+/* ── 全站基礎：關掉亮面效果、把 aurora 壓到背景弱光 ── */
+[data-testid="stAppViewContainer"]::after,
+.aurora-blob-2, .aurora-blob-3 {
+    opacity: 0.35;        /* 光暈留一點呼吸感但不搶戲 */
+    filter: blur(120px);
+}
+[data-testid="stMainBlockContainer"] {
+    padding-top: 1rem !important;
+    max-width: 1360px !important;
+}
+
+/* ── TOP NAV 改扁平 ── */
+.topnav-brand { padding: 2px 0 10px; gap: 12px; }
+.topnav-logo {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: var(--text-hi); color: #09090b;
+    font-size: 0.82rem; font-weight: 800;
+    box-shadow: none;
+}
+.topnav-logo:hover { transform: none; }
+.topnav-name { font-size: 0.98rem; font-weight: 700; letter-spacing: -0.01em; color: var(--text-hi); }
+.topnav-tag  { font-size: 0.68rem; color: var(--text-lo); letter-spacing: 0.06em; margin-top: 1px; }
+
+.topnav-chip {
+    height: 34px !important;
+    padding: 0 12px !important;
+    background: var(--bg-1) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    font-size: 0.76rem !important;
+    color: var(--text-md);
+    gap: 8px !important;
+}
+.topnav-chip:hover { border-color: var(--border-md) !important; background: var(--bg-2) !important; }
+.topnav-chip.online { color: #86efac; }
+.topnav-chip.user { padding-right: 12px !important; }
+.topnav-avatar {
+    width: 22px; height: 22px; font-size: 0.7rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.topnav-user-name { font-size: 0.78rem; color: var(--text-hi); }
+.topnav-user-role { font-size: 0.64rem; color: var(--text-lo); }
+
+/* 登出按鈕 — 對齊 34px chip */
+.logout-slot ~ .stElementContainer .stButton > button,
+div:has(> .logout-slot) .stButton > button {
+    height: 34px !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--border) !important;
+    background: var(--bg-1) !important;
+    color: var(--text-md) !important;
+    font-size: 0.76rem !important;
+    font-weight: 500 !important;
+    padding: 0 12px !important;
+}
+.logout-slot ~ .stElementContainer .stButton > button:hover,
+div:has(> .logout-slot) .stButton > button:hover {
+    background: rgba(239,68,68,0.06) !important;
+    border-color: rgba(239,68,68,0.35) !important;
+    color: #fca5a5 !important;
+}
+
+/* ── HERO 縮小 + 改為 page title ── */
+.hero-divider { margin: 6px 0 14px; }
+.hero-copy { padding-bottom: 4px; }
+.hero-copy h1 {
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.025em !important;
+    line-height: 1.2 !important;
+    background: none !important;
+    -webkit-text-fill-color: var(--text-hi) !important;
+    color: var(--text-hi) !important;
+    display: flex; align-items: center; gap: 10px;
+}
+.hero-copy p {
+    font-size: 0.82rem !important;
+    color: var(--text-lo) !important;
+    margin-top: 4px !important;
+}
+.hero-copy .live-dot { width: 6px; height: 6px; }
+
+/* Hero 右側「新手教學」按鈕 */
+.stElementContainer:has([data-testid="stButton"]) button[data-testid="stBaseButton-secondary"] {
+    border-radius: 6px !important;
+    font-size: 0.8rem !important;
+}
+
+/* ── CONTROL PANEL 改扁平 ── */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: var(--border) !important;
+    border-radius: 10px !important;
+    background: var(--bg-1) !important;
+}
+.ctrl-title {
+    font-size: 0.76rem; font-weight: 600;
+    letter-spacing: 0.02em; text-transform: none;
+    color: var(--text-hi); opacity: 1;
+    padding-bottom: 10px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 8px;
+}
+.ctrl-title::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(99,102,241,0.5);
+}
+.ctrl-subhead {
+    font-size: 0.7rem; font-weight: 500;
+    text-transform: none; letter-spacing: 0;
+    color: var(--text-lo);
+}
+
+/* ── BUTTONS — 扁平 6px ── */
+[data-testid="stBaseButton-primary"] {
+    background: var(--text-hi) !important;
+    color: #09090b !important;
+    border-radius: 6px !important;
+    font-weight: 600 !important;
+    font-size: 0.82rem !important;
+    padding: 0.45rem 1rem !important;
+    height: auto !important;
+    border: 1px solid transparent !important;
+    transition: background 120ms, transform 80ms !important;
+}
+[data-testid="stBaseButton-primary"]:hover {
+    background: #e4e4e7 !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+[data-testid="stBaseButton-primary"]:active { transform: scale(0.98) !important; }
+
+[data-testid="stBaseButton-secondary"] {
+    background: var(--bg-1) !important;
+    color: var(--text-hi) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    font-size: 0.8rem !important;
+    padding: 0.4rem 0.9rem !important;
+    transition: background 120ms, border-color 120ms !important;
+}
+[data-testid="stBaseButton-secondary"]:hover {
+    background: var(--bg-2) !important;
+    border-color: var(--border-md) !important;
+    opacity: 1 !important;
+}
+
+/* ── KPI STRIP (CRM 慣例：一條 strip 分隔 cells) ── */
+.kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 16px 0 20px;
+    animation: fadeIn 350ms var(--ease-out);
+}
+.kpi-cell {
+    padding: 16px 20px;
+    border-right: 1px solid var(--border);
+    position: relative;
+    transition: background 150ms;
+}
+.kpi-cell:last-child { border-right: 0; }
+.kpi-cell:hover { background: var(--bg-2); }
+.kpi-cell .kpi-lbl {
+    font-size: 0.72rem;
+    color: var(--text-lo);
+    font-weight: 500;
+    margin-bottom: 8px;
+    letter-spacing: 0.01em;
+    display: flex; align-items: center; gap: 6px;
+}
+.kpi-cell .kpi-lbl::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-lo); opacity: 0.5;
+}
+.kpi-cell.blue  .kpi-lbl::before { background: #3b82f6; opacity: 1; }
+.kpi-cell.green .kpi-lbl::before { background: var(--green); opacity: 1; }
+.kpi-cell.amber .kpi-lbl::before { background: var(--yellow); opacity: 1; }
+.kpi-cell.violet .kpi-lbl::before { background: #a855f7; opacity: 1; }
+.kpi-cell.red   .kpi-lbl::before { background: var(--red); opacity: 1; }
+.kpi-cell .kpi-val {
+    font-size: 1.75rem;
+    font-weight: 600;
+    letter-spacing: -0.035em;
+    color: var(--text-hi);
+    line-height: 1;
+    font-feature-settings: 'tnum';
+}
+.kpi-cell .kpi-sub {
+    font-size: 0.72rem;
+    color: var(--text-lo);
+    margin-top: 6px;
+}
+
+/* 隱藏 st.metric（如果還殘留） */
+[data-testid="stMetric"] { display: none; }
+
+/* ── TABS 改 underline 薄線 ── */
+[data-testid="stTabs"] [role="tablist"] {
+    gap: 0 !important;
+    border-bottom: 1px solid var(--border) !important;
+    padding: 0 !important;
+}
+[data-testid="stTabs"] [role="tab"] {
+    border-radius: 0 !important;
+    font-size: 0.84rem !important;
+    font-weight: 500 !important;
+    padding: 10px 16px !important;
+    color: var(--text-md) !important;
+    border-bottom: 2px solid transparent !important;
+    margin-bottom: -1px;
+}
+[data-testid="stTabs"] [role="tab"]:hover {
+    background: transparent !important;
+    color: var(--text-hi) !important;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    background: transparent !important;
+    border-bottom: 2px solid var(--accent) !important;
+    color: var(--text-hi) !important;
+    font-weight: 600 !important;
+}
+
+/* ── Inputs / Select / Multiselect 窄邊框 ── */
+[data-testid="stTextInput"] input,
+[data-testid="stMultiSelect"] > div > div,
+[data-testid="stSelectbox"] > div > div {
+    background: var(--bg-1) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    font-size: 0.84rem !important;
+}
+[data-testid="stTextInput"] input:focus-within,
+[data-testid="stMultiSelect"] > div > div:focus-within,
+[data-testid="stSelectbox"] > div > div:focus-within {
+    border-color: var(--accent) !important;
+}
+/* multiselect tag */
+[data-testid="stMultiSelect"] span[data-baseweb="tag"] {
+    background: var(--accent-dim) !important;
+    border: 1px solid rgba(99,102,241,0.35) !important;
+    border-radius: 4px !important;
+    color: #c7d2fe !important;
+}
+
+/* ── 表格（data editor） ── */
+[data-testid="stDataEditor"],
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    overflow: hidden;
+}
+
+/* ── Run status / Est card 改扁平 ── */
+.run-status {
+    background: var(--bg-1); border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 8px; padding: 12px 14px;
+}
+.run-status-head { font-size: 0.8rem; }
+.est-card {
+    background: var(--bg-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px;
+}
+.est-card .est-title { letter-spacing: 0.04em; color: var(--text-lo); }
+
+/* ── Expander 扁平 ── */
+[data-testid="stExpander"] {
+    background: var(--bg-1) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+}
+[data-testid="stExpander"] summary {
+    padding: 10px 14px !important;
+    font-size: 0.82rem !important;
+    color: var(--text-hi) !important;
+}
+
+/* ── Empty state 改 CRM 風 ── */
+.empty-state {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 48px 24px;
+}
+.empty-state h3 { color: var(--text-hi); }
+.empty-state p  { color: var(--text-lo); }
+
+/* ── scrollbar 現代化 ── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a2a30; border-radius: 10px; border: 2px solid var(--bg-0); }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+/* ── A11Y：focus ring 加強（ui-ux-pro-max 建議） ── */
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--accent) !important;
+    outline-offset: 2px !important;
+    box-shadow: 0 0 0 4px rgba(99,102,241,0.25) !important;
+}
+
+/* ── A11Y：尊重使用者偏好的減少動畫設定 ── */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+    .aurora-blob-2, .aurora-blob-3,
+    [data-testid="stAppViewContainer"]::after,
+    .status-dot, .live-dot {
+        animation: none !important;
+    }
 }

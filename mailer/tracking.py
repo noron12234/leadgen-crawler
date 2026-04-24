@@ -86,14 +86,16 @@ def inject_tracking(
     is_html: bool,
 ) -> tuple[str, bool]:
     """
-    在內文注入 pixel + 改寫連結。
+    在內文注入 open pixel + 改寫 http(s) 連結為可追蹤網址。
+
+    - 純文字信：linkify 後改寫 → 升級為 HTML
+    - HTML 信：直接改寫所有 <a href="http(s)://..."> → /t/click/{uid}?u=...
+    - 無連結的信仍會注入 pixel，不影響開信偵測
 
     Returns:
-        (new_body, is_html_after)
-        — 純文字信會被升級為 HTML（pixel 必須 <img>）
+        (new_body, is_html_after) — 純文字信會被升級為 HTML（pixel 必須 <img>）
     """
     if not base_url:
-        # 沒設 TRACKING_BASE_URL → 不追蹤（但仍回傳原文）
         return body, is_html
 
     html = body if is_html else wrap_text_as_html(body)

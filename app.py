@@ -26,7 +26,7 @@ st.set_page_config(
     page_title="LeadFlow | 業務開發名單系統",
     page_icon="◆",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ══════════════════════════════════════════════════════
@@ -92,7 +92,7 @@ class _StreamlitLogHandler(logging.Handler):
             pass
 
 
-def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, progress_slot=None) -> dict:
+def run_crawlers(areas: list[str], max_pages: int, run_cake: bool, run_yourator: bool, progress_slot=None) -> dict:
     from crawlers.crawler_104 import crawl_snack_companies
     from crawlers.crawler_cake import crawl_cake_jobs
     from crawlers.crawler_yourator import crawl_yourator_companies
@@ -112,10 +112,10 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
     if outer_slot is not None:
         panel = outer_slot.container(border=True)
     else:
-        panel = st.sidebar.container()
+        panel = st.container(border=True)
 
     header          = panel.empty()
-    progress        = panel.progress(0, text="🚀 準備啟動爬蟲…")
+    progress        = panel.progress(0, text="準備開始…")
     company_counter = panel.empty()
     log_box         = panel.empty()
     log_lines: list[str] = []
@@ -129,6 +129,9 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 
+    # ETA 快取：只在「階段完成」時重算，避免同階段內 avg 被 elapsed 拉爆
+    eta_cache = {"text": ""}
+
     def _tick(step_idx: int, label: str, note: str = "", done: bool = False):
         """
         step_idx: 1-based（第 1 階段 = 1）
@@ -141,13 +144,14 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
         if step_idx >= total_phases and done:
             pct = 100
 
-        # ETA：只在跑過 1 秒後才算
-        if elapsed > 1 and step_idx > 0:
+        # ETA：只在某階段「真的完成」那一刻重算（基於已完成階段的平均時間）
+        # 同階段內只顯示快取值，避免 avg = elapsed/step_idx 持續變大
+        if done and step_idx > 0 and step_idx < total_phases:
             avg = elapsed / step_idx
             remaining = max(0, avg * (total_phases - step_idx))
-            eta = f" · 預估剩餘 {int(remaining)} 秒"
-        else:
-            eta = ""
+            eta_cache["text"] = f" · 預估剩餘 {int(remaining)} 秒" if remaining > 0 else ""
+        elif done and step_idx >= total_phases:
+            eta_cache["text"] = ""  # 全部完成，清空
 
         header.markdown(
             f"<div style='font-size:1rem;font-weight:600;margin-bottom:4px'>"
@@ -155,7 +159,7 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
             f"<div style='font-size:0.82rem;opacity:0.65'>{note}</div>",
             unsafe_allow_html=True,
         )
-        progress.progress(pct, text=f"{pct}%　·　已跑 {int(elapsed)} 秒{eta}")
+        progress.progress(pct, text=f"{pct}%　·　已跑 {int(elapsed)} 秒{eta_cache['text']}")
 
     all_raw = []
     step = 1  # 1-based 階段編號
@@ -174,17 +178,13 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
                 unsafe_allow_html=True,
             )
             # 同步更新進度條文字（讓秒數在長時間階段內持續走動）
+            # ETA 沿用 eta_cache，不在單一階段內重算（否則 avg=elapsed/step 會越跑越大）
             _elapsed = time.time() - started_at
             _virt = step - 0.5
             _pct = max(2, min(99, int(_virt / total_phases * 100)))
-            _eta_txt = ""
-            if _elapsed > 1:
-                _avg = _elapsed / max(step, 1)
-                _rem = max(0, _avg * (total_phases - step + 1))
-                _eta_txt = f" · 預估剩餘 {int(_rem)} 秒"
-            progress.progress(_pct, text=f"{_pct}%　·　已跑 {int(_elapsed)} 秒{_eta_txt}")
+            progress.progress(_pct, text=f"{_pct}%　·　已跑 {int(_elapsed)} 秒{eta_cache['text']}")
 
-        r104 = crawl_snack_companies(areas=[area], max_pages=max_pages, delay=0.4,
+        r104 = crawl_snack_companies(areas=areas, max_pages=max_pages, delay=0.4,
                                       progress_callback=_on_company)
         all_raw.extend(r104)
         company_counter.empty()
@@ -220,7 +220,7 @@ def run_crawlers(area: str, max_pages: int, run_cake: bool, run_yourator: bool, 
         try:
             from database.db import log_activity
             log_activity(_crawler_user, "crawl",
-                         f"爬取 {area} · 新增 {new_count} 家 · 更新 {updated_count} 家")
+                         f"爬取 {len(areas)} 區 · 新增 {new_count} 家 · 更新 {updated_count} 家")
         except Exception:
             pass
 
@@ -258,76 +258,292 @@ def to_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-# ══════════════════════════════════════════════════════
-# 爬蟲進度區（主畫面，先建好讓 sidebar 的按鈕寫入）
-# ══════════════════════════════════════════════════════
-_crawl_slot = st.empty()
-st.session_state["_crawl_progress_slot"] = _crawl_slot
+# 爬蟲進度區 slot 改到 control panel 下方建立（見下面 CONTROL PANEL 區塊）
 
 
 # ══════════════════════════════════════════════════════
-# SIDEBAR
+# 📖 新手教學彈窗（5 步圖文流程）
 # ══════════════════════════════════════════════════════
-with st.sidebar:
+@st.dialog("新手教學", width="large")
+def show_tutorial():
     st.markdown("""
-    <div class="sidebar-brand">
-        <div class="logo-mark">LF</div>
-        <div class="name">LeadFlow</div>
-        <div class="tagline">業務開發名單系統</div>
+    <style>
+    .tut-step {
+        display: flex; gap: 14px; margin: 10px 0;
+        background: rgba(255,255,255,0.02);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        padding: 14px 16px;
+    }
+    .tut-num {
+        flex-shrink: 0;
+        width: 28px; height: 28px; border-radius: 6px;
+        background: #6366f1;
+        display: flex; align-items: center; justify-content: center;
+        color: #fff; font-weight: 700; font-size: 0.88rem;
+    }
+    .tut-body { flex: 1; font-size: 0.88rem; line-height: 1.7; color: #e4e4e7; }
+    .tut-title { font-weight: 600; margin-bottom: 2px; color: #fafafa; }
+    .tut-body code {
+        background: rgba(99,102,241,0.15); color: #c7d2fe;
+        padding: 1px 8px; border-radius: 4px; font-size: 0.82rem;
+    }
+    .tut-tip {
+        background: rgba(251,191,36,0.05);
+        border: 1px solid rgba(251,191,36,0.2);
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin: 14px 0 4px;
+        font-size: 0.82rem; line-height: 1.7; color: #e4e4e7;
+    }
+    </style>
+
+    <p style="font-size:0.86rem;color:#a1a1aa;margin:0 0 14px">
+      跟著這四步走一遍，從找公司到寄完信大概 10 分鐘。
+    </p>
+
+    <div class="tut-step">
+      <div class="tut-num">1</div>
+      <div class="tut-body">
+        <div class="tut-title">載入 10 家示範公司</div>
+        去 <code>開發信</code> 最上面展開「第一次用？」，<b>填你自己的 Gmail</b>，
+        按「載入 10 家示範公司」。10 封信會用 <code>你的信箱+lead01~10</code> 寄出，
+        全部都會進到你原本信箱，只是收件人看起來不一樣，方便分辨。
+      </div>
+    </div>
+
+    <div class="tut-step">
+      <div class="tut-num">2</div>
+      <div class="tut-body">
+        <div class="tut-title">設定寄件 Gmail</div>
+        在 <code>開發信</code> 展開「Gmail 設定」，填 Gmail 和應用程式密碼。
+        不會設就看 <code>Gmail 設定</code> 分頁，有圖解 5 步驟。
+      </div>
+    </div>
+
+    <div class="tut-step">
+      <div class="tut-num">3</div>
+      <div class="tut-body">
+        <div class="tut-title">勾選公司 → 寄送</div>
+        回 <code>名單</code> 勾選「測試公司 01~10」→ 切到開發信 →
+        寫主旨和內文 → 按「確認寄出」。
+      </div>
+    </div>
+
+    <div class="tut-step">
+      <div class="tut-num">4</div>
+      <div class="tut-body">
+        <div class="tut-title">去信箱打開 → 回系統看追蹤結果</div>
+        打開你 Gmail，10 封信會陸續進來。打開幾封、也點一下信裡的連結。
+        系統會自動忽略 Gmail 的預掃（只記錄你真的打開的那幾封）。
+        回到系統的 <code>寄信成效</code>，已打開、點過連結的會分區顯示；
+        點過連結的客戶會自動標成「熱門」。
+      </div>
+    </div>
+
+    <div class="tut-tip">
+      給客戶看的時候可以說：「您不用信我，自己試一次 —
+      填您的信箱、載入 10 家示範公司、按寄送、去信箱打開其中幾封、點一下信裡的連結，
+      回到『寄信成效』就能看到哪些您打開了、哪些您點過連結。
+      系統會自動把『點過連結』的標成熱門客戶，這就是業務真正要跟進的名單。」
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 搜尋設定 ──
-    st.markdown('<p class="sidebar-section">搜尋設定</p>', unsafe_allow_html=True)
+    if st.button("關閉", type="primary", use_container_width=True):
+        st.rerun()
 
-    area_options = {
-        "台北市": "6001001000",
-        "新北市": "6001002000",
-        "桃園市": "6001003000",
-        "台中市": "6001006000",
-    }
-    selected_area_name = st.selectbox("目標地區", list(area_options.keys()), key="area")
-    area_code = area_options[selected_area_name]
-    max_pages = st.slider("每平台最多爬幾頁", min_value=1, max_value=10, value=3, key="max_pages")
 
-    # ── 資料來源 ──
-    st.markdown('<p class="sidebar-section">資料來源</p>', unsafe_allow_html=True)
-    use_cake = st.checkbox("Cake.me", value=True, key="use_cake")
-    use_yourator = st.checkbox("Yourator", value=True, key="use_yourator")
-    st.divider()
+# ══════════════════════════════════════════════════════
+# TOP NAV — 品牌列 + 使用者資訊 + 登出
+# ══════════════════════════════════════════════════════
+_nav_left, _nav_right = st.columns([3, 2], vertical_alignment="center")
 
-    # ── 開始抓取 ──
-    st.caption("ℹ️ 重複執行會**累積**到資料庫（不會清空）。同時只能**一人**爬蟲。")
+with _nav_left:
+    st.markdown("""
+    <div class="topnav-brand">
+        <div class="topnav-logo">LF</div>
+        <div class="topnav-title">
+            <div class="topnav-name">LeadFlow</div>
+            <div class="topnav-tag">業務開發名單系統</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # 檢查爬蟲鎖
-    from database.db import get_lock_holder, acquire_lock, release_lock
-    _crawl_holder = get_lock_holder("crawl")
-    _me = st.session_state.get("username", "")
-    _crawl_locked_by_other = bool(_crawl_holder) and _crawl_holder["locked_by"] != _me
+with _nav_right:
+    # 在線人數 + 使用者名稱 + 登出按鈕
+    try:
+        from database.db import get_online_users as _gou
+        _online = _gou()
+        _online_n = len(_online)
+    except Exception:
+        _online = []
+        _online_n = 0
 
+    _me_display = st.session_state.get("name", "") or st.session_state.get("username", "—")
+    _me_role = st.session_state.get("user_role", "user")
+    _role_label = "Admin" if _me_role == "superadmin" else "成員"
+
+    # 右上排列：[🟢 在線] [使用者 chip] [登出]
+    _r_a, _r_b, _r_c = st.columns([1.1, 1.4, 0.7], vertical_alignment="center")
+    with _r_a:
+        _online_label = f"{_online_n} 人在線" if _online_n else "僅你在線"
+        _online_title = "、".join(u["username"] for u in _online) if _online else ""
+        st.markdown(
+            f'<div class="topnav-chip online" title="{_online_title}">'
+            f'<span class="status-dot"></span>{_online_label}</div>',
+            unsafe_allow_html=True,
+        )
+    with _r_b:
+        st.markdown(
+            f'<div class="topnav-chip user">'
+            f'<span class="topnav-avatar">{(_me_display[:1] or "·").upper()}</span>'
+            f'<div class="topnav-user-meta">'
+            f'<div class="topnav-user-name">{_me_display}</div>'
+            f'<div class="topnav-user-role">{_role_label}</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+    with _r_c:
+        st.markdown('<div class="logout-slot"></div>', unsafe_allow_html=True)
+        _authenticator = st.session_state.get("_authenticator")
+        if _authenticator:
+            _authenticator.logout("登出", key="logout_btn")
+
+# ══════════════════════════════════════════════════════
+# HERO — 大標題 + 教學按鈕（並排）
+# ══════════════════════════════════════════════════════
+st.markdown('<div class="hero-divider"></div>', unsafe_allow_html=True)
+_hero_left, _hero_right = st.columns([4, 1.2], vertical_alignment="center")
+with _hero_left:
+    st.markdown("""
+    <div class="hero-copy">
+        <h1>找客戶、寄信、看誰打開了</h1>
+        <p><span class="live-dot"></span>從 104、Cake、Yourator 找有零食福利的公司，整理成名單直接寄開發信</p>
+    </div>
+    """, unsafe_allow_html=True)
+with _hero_right:
+    if st.button("第一次用？看教學", use_container_width=True, key="btn_tutorial"):
+        show_tutorial()
+
+# ══════════════════════════════════════════════════════
+# CONTROL PANEL — 爬蟲控制台（原 sidebar 核心）
+# ══════════════════════════════════════════════════════
+# 104 官方地區代碼（來源：https://static.104.com.tw/category-tool/json/Area.json）
+AREA_OPTIONS = {
+    "🌏 全台灣（會跑 20 次，約 20-40 分）": "__ALL__",
+    "台北市": "6001001000",
+    "新北市": "6001002000",
+    "桃園市": "6001005000",
+    "台中市": "6001008000",
+    "台南市": "6001014000",
+    "高雄市": "6001016000",
+    "基隆市": "6001004000",
+    "新竹縣市": "6001006000",
+    "嘉義縣市": "6001013000",
+    "宜蘭縣": "6001003000",
+    "苗栗縣": "6001007000",
+    "彰化縣": "6001010000",
+    "南投縣": "6001011000",
+    "雲林縣": "6001012000",
+    "屏東縣": "6001018000",
+    "台東縣": "6001019000",
+    "花蓮縣": "6001020000",
+    "澎湖縣": "6001021000",
+    "金門縣": "6001022000",
+    "連江縣": "6001023000",
+}
+_ALL_TW_CODES = [v for k, v in AREA_OPTIONS.items() if v != "__ALL__"]
+
+# 檢查爬蟲鎖
+from database.db import get_lock_holder, acquire_lock, release_lock
+_crawl_holder = get_lock_holder("crawl")
+_me = st.session_state.get("username", "")
+_crawl_locked_by_other = bool(_crawl_holder) and _crawl_holder["locked_by"] != _me
+_panel_disabled = _absorb_queued_clicks or _crawl_locked_by_other
+
+with st.container(border=True):
+    st.markdown('<div class="ctrl-title">找新客戶</div>', unsafe_allow_html=True)
+
+    # ── 第一列：參數設定 ──
+    _p1, _p2, _p3 = st.columns([2.2, 1.3, 1.3])
+    with _p1:
+        selected_area_names = st.multiselect(
+            "在哪些地區找（可複選）",
+            list(AREA_OPTIONS.keys()),
+            default=["台北市"],
+            placeholder="選一個或多個縣市",
+            key="area",
+        )
+        if any(AREA_OPTIONS[n] == "__ALL__" for n in selected_area_names):
+            area_codes = _ALL_TW_CODES
+            _area_label = "🌏 全台灣"
+        else:
+            area_codes = [AREA_OPTIONS[n] for n in selected_area_names]
+            _area_label = "／".join(selected_area_names) if selected_area_names else "（未選）"
+
+        if len(area_codes) >= 10:
+            st.caption(f"選了 {len(area_codes)} 區，會跑 20-40 分鐘，建議夜間再開")
+        elif len(area_codes) >= 4:
+            st.caption(f"選了 {len(area_codes)} 區，會跑 5-15 分鐘")
+    with _p2:
+        max_pages = st.slider("搜尋深度（每個網站翻幾頁）",
+                              min_value=1, max_value=10, value=3, key="max_pages")
+    with _p3:
+        st.markdown('<p class="ctrl-subhead">除了 104 還要找哪裡</p>', unsafe_allow_html=True)
+        use_cake = st.checkbox("Cake.me", value=True, key="use_cake")
+        use_yourator = st.checkbox("Yourator", value=True, key="use_yourator")
+
+    # ── 鎖狀態提示 ──
     if _crawl_locked_by_other:
         st.markdown(
             f"""
-            <div style='background:rgba(245,158,11,0.08);border-left:3px solid #f59e0b;
-                        padding:10px 14px;border-radius:0 8px 8px 0;font-size:0.82rem'>
-                🔒 <b>{_crawl_holder['locked_by']}</b> 正在爬蟲中
-                <div style='opacity:0.55;font-size:0.74rem;margin-top:2px'>
-                    {_crawl_holder.get('note', '')}　·　請稍候
-                </div>
+            <div class='ctrl-lock'>
+                <b>{_crawl_holder['locked_by']}</b> 正在搜尋中
+                <span class='ctrl-lock-meta'>{_crawl_holder.get('note', '')}　·　請稍候</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    _crawl_btn_clicked = st.button(
-        "🚀 開始抓取" if not _crawl_locked_by_other else "⏳ 其他人正在爬蟲",
-        type="primary", use_container_width=True, key="btn_crawl",
-        disabled=_crawl_locked_by_other or _absorb_queued_clicks,
-    )
+    # ── 第二列：動作鈕 ──
+    _a1, _a2, _a3 = st.columns([1.6, 1.3, 3.1])
+    with _a1:
+        _crawl_btn_clicked = st.button(
+            "開始找客戶" if not _crawl_locked_by_other else "其他人正在找",
+            type="primary", use_container_width=True, key="btn_crawl",
+            disabled=_panel_disabled,
+        )
+    with _a2:
+        _est_btn = st.button(
+            "估算能找幾家", use_container_width=True,
+            key="btn_estimate", disabled=_panel_disabled,
+        )
+    with _a3:
+        st.caption("每次找到新公司都會加進名單，重複執行不會洗掉舊資料；同一時間只能一人執行")
 
+    # ── 爬蟲進度顯示區（按鈕下方，爬蟲執行時會寫入這裡） ──
+    _crawl_slot = st.empty()
+    st.session_state["_crawl_progress_slot"] = _crawl_slot
+
+    # ── 預估邏輯 ──
+    if _est_btn:
+        if not area_codes:
+            st.warning("先選一個地區")
+        else:
+            with st.spinner(f"查詢 {len(area_codes)} 區..."):
+                totals = {"estimated_unique": 0}
+                for _code in area_codes:
+                    _est = fetch_estimated_total(_code) or {}
+                    totals["estimated_unique"] += _est.get("estimated_unique", 0) or 0
+                st.session_state.estimated_total = totals
+
+    # ── 執行爬蟲 ──
     if _crawl_btn_clicked:
+        if not area_codes:
+            st.error("先選一個地區")
+            st.stop()
         ok, msg = acquire_lock("crawl", _me,
-                                note=f"爬取 {selected_area_name} {max_pages} 頁")
+                                note=f"找 {_area_label} {max_pages} 頁")
         if not ok:
             st.error(f"無法開始：{msg}")
         else:
@@ -335,7 +551,7 @@ with st.sidebar:
             try:
                 with st.status("⚙️ 執行中…", expanded=False) as status:
                     result = run_crawlers(
-                        area=area_code,
+                        areas=area_codes,
                         max_pages=max_pages,
                         run_cake=use_cake,
                         run_yourator=use_yourator,
@@ -346,187 +562,150 @@ with st.sidebar:
                 st.session_state.last_run_status = "success"
                 st.session_state.last_run_duration = result.get("duration_sec", 0)
                 st.session_state.last_run_error = None
-                st.toast(f"🎉 爬蟲完成：新增 {result['new']} 家，更新 {result['updated']} 家", icon="✅")
+                st.toast(f"找完了：新增 {result['new']} 家，更新 {result['updated']} 家", icon="✅")
             except Exception as e:
-                logger.exception("爬蟲執行失敗")
+                logger.exception("搜尋失敗")
                 st.session_state.last_run_result = None
                 st.session_state.last_run_status = "error"
                 st.session_state.last_run_error = str(e)[:200]
                 st.session_state.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                st.toast(f"❌ 爬蟲失敗：{str(e)[:80]}", icon="⚠️")
+                st.toast(f"失敗：{str(e)[:80]}", icon="⚠️")
             finally:
                 release_lock("crawl", _me)
                 st.session_state["_crawling"] = False
-                st.session_state["_crawl_latch"] = True  # 下一輪繼續 disable 按鈕
+                st.session_state["_crawl_latch"] = True
             st.rerun()
 
-    # ── 持久狀態卡：離開電腦回來也能看到上次結果 ──
-    if st.session_state.last_run_status == "success" and st.session_state.last_run_result:
-        r = st.session_state.last_run_result
-        st.markdown(
-            f"""
-            <div class="run-status run-status-ok">
-                <div class="run-status-head">✅ 上次爬蟲完成</div>
-                <div class="run-status-body">
-                    <div>新增　<b>{r.get('new', 0)}</b> 家</div>
-                    <div>更新　<b>{r.get('updated', 0)}</b> 家</div>
-                    <div>總計　<b>{r.get('total_crawled', 0)}</b> 家</div>
-                    <div class="run-status-meta">⏱ {r.get('duration_sec', 0)} 秒　·　{st.session_state.last_run_time}</div>
+    # ── 持久狀態卡 + 預估卡（並排） ──
+    _status_col, _est_col = st.columns(2)
+    with _status_col:
+        if st.session_state.last_run_status == "success" and st.session_state.last_run_result:
+            r = st.session_state.last_run_result
+            st.markdown(
+                f"""
+                <div class="run-status run-status-ok">
+                    <div class="run-status-head">上次找完客戶</div>
+                    <div class="run-status-body">
+                        <span>新增 <b>{r.get('new', 0)}</b> 家</span>　·
+                        <span>更新 <b>{r.get('updated', 0)}</b> 家</span>　·
+                        <span>共 <b>{r.get('total_crawled', 0)}</b> 家</span>
+                        <div class="run-status-meta">⏱ {r.get('duration_sec', 0)} 秒　·　{st.session_state.last_run_time}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif st.session_state.last_run_status == "error":
+            st.markdown(
+                f"""
+                <div class="run-status run-status-err">
+                    <div class="run-status-head">上次失敗</div>
+                    <div class="run-status-body">
+                        <div>{st.session_state.last_run_error or '未知錯誤'}</div>
+                        <div class="run-status-meta">{st.session_state.last_run_time}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with _est_col:
+        if st.session_state.estimated_total:
+            est = st.session_state.estimated_total
+            total_est = est.get("estimated_unique", 0)
+            from database.db import get_stats as _gs
+            _db_total = _gs().get("total", 0)
+            already_in_db = _db_total
+            remaining_est = max(total_est - already_in_db, 0)
+            pct_done = min(round(already_in_db / max(total_est, 1) * 100), 100)
+
+            st.markdown(f"""
+            <div class="est-card">
+                <div class="est-title">{_area_label} · 進度</div>
+                <div class="est-row"><span>估計可爬</span><span class="val">~{total_est:,}</span></div>
+                <div class="est-row"><span>已在 DB</span><span class="val" style="color:#22c55e">{already_in_db:,}</span></div>
+                <div class="est-row"><span>估計還剩</span><span class="val" style="color:#f59e0b">~{remaining_est:,}</span></div>
+                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.07)">
+                    <div style="display:flex;justify-content:space-between;font-size:0.72rem;opacity:0.55;margin-bottom:4px">
+                        <span>進度</span><span>{pct_done}%</span>
+                    </div>
+                    <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">
+                        <div style="width:{pct_done}%;height:100%;background:linear-gradient(90deg,#3b82f6,#22c55e);border-radius:2px;transition:width 0.6s"></div>
+                    </div>
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    elif st.session_state.last_run_status == "error":
-        st.markdown(
-            f"""
-            <div class="run-status run-status-err">
-                <div class="run-status-head">❌ 上次爬蟲失敗</div>
-                <div class="run-status-body">
-                    <div>{st.session_state.last_run_error or '未知錯誤'}</div>
-                    <div class="run-status-meta">{st.session_state.last_run_time}</div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            """, unsafe_allow_html=True)
 
-    st.divider()
+# ══════════════════════════════════════════════════════
+# 輔助工具 & 系統管理（可收合）
+# ══════════════════════════════════════════════════════
+_is_admin_nav = st.session_state.get("user_role") == "superadmin"
 
-    # ── 預估 ──
-    _sidebar_disabled = _absorb_queued_clicks or bool(_crawl_holder)
-    if st.button("預估可爬數量", use_container_width=True, key="btn_estimate",
-                 disabled=_sidebar_disabled):
-        with st.spinner("查詢中..."):
-            est = fetch_estimated_total(area_code)
-            st.session_state.estimated_total = est
+with st.expander("更多工具", expanded=False):
+    _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+    with _tc1:
+        if st.button("檢查 email 是否有效", use_container_width=True, key="btn_verify",
+                     disabled=_panel_disabled):
+            from database.db import get_all_companies as _gac
+            from processors.email_verifier import verify_all
+            clist = _gac()
+            has_email = [c for c in clist if c.get("email") and "@" in c.get("email", "")]
+            if not has_email:
+                st.warning("目前 DB 沒有 email 資料")
+            else:
+                with st.spinner(f"驗證 {len(has_email)} 個 email 中..."):
+                    verified = verify_all(has_email, max_workers=10)
+                valid_n = sum(1 for c in verified if c.get("email_status") == "valid")
+                suspect_n = sum(1 for c in verified if c.get("email_status") == "suspect")
+                invalid_n = sum(1 for c in verified if c.get("email_status") == "invalid")
+                st.success(f"有效 {valid_n} · 疑似 {suspect_n} · 無效 {invalid_n}")
+                st.session_state["email_verify_result"] = verified
 
-    if st.session_state.estimated_total:
-        est = st.session_state.estimated_total
-        total_est   = est.get("estimated_unique", 0)
-        # db_stats 在主區才載入，sidebar 這裡自己查一次
-        from database.db import get_stats as _gs
-        _db_total = _gs().get("total", 0)
-        already_in_db = _db_total
-        remaining_est = max(total_est - already_in_db, 0)
-        pct_done = min(round(already_in_db / max(total_est, 1) * 100), 100)
+    with _tc2:
+        if st.button("從官網找 email", use_container_width=True, key="btn_scan_web",
+                     help="對有官網但沒 email 的公司，自動掃描首頁找聯絡信箱",
+                     disabled=_panel_disabled):
+            from processors.website_email_scanner import scan_and_update_db
+            with st.spinner("掃描官網中..."):
+                result = scan_and_update_db(max_workers=5)
+            st.success(f"掃描 {result['scanned']} 家 · 找到 {result['found']} 個 · 更新 {result['updated']} 筆")
+            if result['updated'] > 0:
+                st.rerun()
 
-        st.markdown(f"""
-        <div class="est-card">
-            <div class="est-title">{selected_area_name} 爬蟲進度</div>
-            <div class="est-row">
-                <span>估計可爬公司</span>
-                <span class="val">~{total_est:,}</span>
-            </div>
-            <div class="est-row">
-                <span>已在資料庫</span>
-                <span class="val" style="color:#22c55e">{already_in_db:,}</span>
-            </div>
-            <div class="est-row">
-                <span>估計還剩</span>
-                <span class="val" style="color:#f59e0b">~{remaining_est:,}</span>
-            </div>
-            <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.07)">
-                <div style="display:flex;justify-content:space-between;font-size:0.72rem;opacity:0.55;margin-bottom:4px">
-                    <span>爬取進度</span><span>{pct_done}%</span>
-                </div>
-                <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">
-                    <div style="width:{pct_done}%;height:100%;background:linear-gradient(90deg,#3b82f6,#22c55e);border-radius:2px;transition:width 0.6s"></div>
-                </div>
-            </div>
-            <div style="margin-top:10px;font-size:0.72rem;opacity:0.4;line-height:1.6">
-                資料來自 104 wf27/19/18 過濾結果<br>
-                每次爬取最多抓 max_pages × 30 筆
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── 工具 ──
-    st.markdown('<p class="sidebar-section">輔助工具</p>', unsafe_allow_html=True)
-
-    if st.button("驗證 Email（DNS）", use_container_width=True, key="btn_verify",
-                 disabled=_sidebar_disabled):
-        from database.db import get_all_companies
-        from processors.email_verifier import verify_all
-        clist = get_all_companies()
-        has_email = [c for c in clist if c.get("email") and "@" in c.get("email", "")]
-        if not has_email:
-            st.warning("目前 DB 沒有 email 資料")
-        else:
-            with st.spinner(f"驗證 {len(has_email)} 個 email 中..."):
-                verified = verify_all(has_email, max_workers=10)
-            valid_n = sum(1 for c in verified if c.get("email_status") == "valid")
-            suspect_n = sum(1 for c in verified if c.get("email_status") == "suspect")
-            invalid_n = sum(1 for c in verified if c.get("email_status") == "invalid")
-            st.success(f"有效 {valid_n} · 疑似 {suspect_n} · 無效 {invalid_n}")
-            st.session_state["email_verify_result"] = verified
-
-    if st.button("官網 Email 補充", use_container_width=True, key="btn_scan_web",
-                 help="掃描有官網但沒 email 的公司首頁",
-                 disabled=_sidebar_disabled):
-        from processors.website_email_scanner import scan_and_update_db
-        with st.spinner("掃描官網中..."):
-            result = scan_and_update_db(max_workers=5)
-        st.success(f"掃描 {result['scanned']} 家 · 找到 {result['found']} 個 · 更新 {result['updated']} 筆")
-        if result['updated'] > 0:
-            st.rerun()
-
-    # ── 在線使用者 ──
-    st.markdown('<p class="sidebar-section">🟢 目前在線</p>', unsafe_allow_html=True)
-    try:
-        from database.db import get_online_users
-        _online = get_online_users()
-        _me_username = st.session_state.get("username", "")
+    with _tc3:
         if _online:
-            items = []
+            _me_username = st.session_state.get("username", "")
+            _online_items = []
             for u in _online:
                 uname = u["username"]
                 is_me = (uname == _me_username)
-                items.append(
-                    f'<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:0.78rem">'
-                    f'<span style="width:6px;height:6px;border-radius:50%;background:#22c55e;'
-                    f'box-shadow:0 0 4px rgba(34,197,94,0.6)"></span>'
-                    f'<b style="color:{"#fbbf24" if is_me else "#f5f5f5"}">{uname}</b>'
-                    f'{"（你）" if is_me else ""}'
-                    f'</div>'
+                _online_items.append(
+                    f'<span class="online-pill{" me" if is_me else ""}">'
+                    f'<span class="status-dot"></span>{uname}{"（你）" if is_me else ""}'
+                    f'</span>'
                 )
             st.markdown(
-                f'<div style="background:rgba(34,197,94,0.05);border:1px solid rgba(34,197,94,0.18);'
-                f'border-radius:8px;padding:8px 12px">{"".join(items)}</div>',
+                '<div class="online-wrap">🟢 目前在線：' + "".join(_online_items) + '</div>',
                 unsafe_allow_html=True,
             )
         else:
-            st.caption("只有你在線")
-    except Exception:
-        pass
+            st.caption("🟢 只有你在線")
 
-    # ── 系統 ──
-    st.markdown('<p class="sidebar-section">系統管理</p>', unsafe_allow_html=True)
-    with st.expander("危險操作"):
-        if st.button("清空資料庫", type="secondary", use_container_width=True, key="btn_clear"):
-            from database.db import clear_all
-            clear_all()
-            st.session_state.last_run_result = None
-            st.success("資料庫已清空")
-            st.rerun()
+    with _tc4:
+        if _is_admin_nav:
+            if st.button("清空所有資料", type="secondary", use_container_width=True, key="btn_clear"):
+                from database.db import clear_all
+                clear_all()
+                st.session_state.last_run_result = None
+                st.success("資料已清空")
+                st.rerun()
+        else:
+            st.caption("")
 
 
 # ══════════════════════════════════════════════════════
 # MAIN AREA
 # ══════════════════════════════════════════════════════
-
-# ── Header ──
-st.markdown("""
-<div class="app-header">
-    <div class="brand">
-        <div class="logo">LF</div>
-        <div>
-            <h1>LeadFlow</h1>
-            <p class="subtitle"><span class="live-dot"></span>自動從 104、Cake、Yourator 累積企業聯絡名單</p>
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
 
 # ── 載入資料 ──
 from database.db import get_all_companies, get_stats
@@ -567,17 +746,29 @@ if st.session_state.last_run_result:
                          height=min(400, 60 + 35 * len(new_df)))
     st.divider()
 
-# ── KPI 指標卡 ──
+# ── KPI 指標卡（CRM strip 樣式） ──
 pct_email    = round(db_stats['has_email'] / max(db_stats['total'], 1) * 100)
 pct_phone    = round(db_stats['has_phone'] / max(db_stats['total'], 1) * 100)
 pct_contacted= round(db_stats['contacted'] / max(db_stats['total'], 1) * 100)
 
-kc1, kc2, kc3, kc4, kc5 = st.columns(5)
-kc1.metric("公司總數",  db_stats['total'],        "資料庫累積")
-kc2.metric("有 Email", db_stats['has_email'],     f"覆蓋率 {pct_email}%")
-kc3.metric("有電話",   db_stats['has_phone'],     f"覆蓋率 {pct_phone}%")
-kc4.metric("已聯繫",   db_stats['contacted'],     f"占比 {pct_contacted}%")
-kc5.metric("待開發",   db_stats['remaining'],     "可立即開信")
+_kpi_cells = [
+    ("", "公司總數", db_stats['total'], "資料庫累積"),
+    ("blue", "有 Email", db_stats['has_email'], f"覆蓋率 {pct_email}%"),
+    ("amber", "有電話", db_stats['has_phone'], f"覆蓋率 {pct_phone}%"),
+    ("violet", "已聯繫", db_stats['contacted'], f"占比 {pct_contacted}%"),
+    ("green", "待開發", db_stats['remaining'], "可立即開信"),
+]
+st.markdown(
+    '<div class="kpi-strip">' + "".join(
+        f'<div class="kpi-cell {_c}">'
+        f'<div class="kpi-lbl">{_l}</div>'
+        f'<div class="kpi-val">{_v:,}</div>'
+        f'<div class="kpi-sub">{_s}</div>'
+        f'</div>'
+        for _c, _l, _v, _s in _kpi_cells
+    ) + '</div>',
+    unsafe_allow_html=True,
+)
 
 # ── 空狀態 ──
 if db_stats["total"] == 0:
@@ -585,8 +776,8 @@ if db_stats["total"] == 0:
     <div class="empty-state">
         <div class="icon">📋</div>
         <h3>資料庫還沒有資料</h3>
-        <p>點左側「開始抓取」按鈕，系統會從 104 / Cake / Yourator 累積名單</p>
-        <span class="hint">← 側邊欄「開始抓取」</span>
+        <p>在上方選地區、按「開始找客戶」，系統會自動從 104、Cake、Yourator 找公司</p>
+        <span class="hint">↑ 看頁面頂端的控制台</span>
     </div>
     """, unsafe_allow_html=True)
     st.stop()
@@ -598,12 +789,11 @@ _is_admin = st.session_state.get("user_role") == "superadmin"
 
 if _is_admin:
     tab_leads, tab_email, tab_history, tab_analytics, tab_guide, tab_admin = st.tabs(
-        ["📋 名單管理", "📨 開發信", "📊 歷史紀錄", "📈 追蹤分析",
-         "❓ Gmail 設定教學", "👑 管理後台"]
+        ["名單", "開發信", "寄信紀錄", "寄信成效", "Gmail 設定", "管理後台"]
     )
 else:
     tab_leads, tab_email, tab_history, tab_analytics, tab_guide = st.tabs(
-        ["📋 名單管理", "📨 開發信", "📊 歷史紀錄", "📈 追蹤分析", "❓ Gmail 設定教學"]
+        ["名單", "開發信", "寄信紀錄", "寄信成效", "Gmail 設定"]
     )
     tab_admin = None
 
@@ -621,7 +811,7 @@ with tab_leads:
             all_sources = sorted(set(c.get("source", "").upper() for c in companies if c.get("source")))
             filter_sources = st.multiselect("來源平台", all_sources, default=all_sources, key="filter_source")
 
-        tcol1, tcol2, tcol3, tcol4 = st.columns(4)
+        tcol1, tcol2, tcol3, tcol4, tcol5 = st.columns(5)
         with tcol1:
             filter_snack = st.toggle("零食福利", value=False, key="filter_snack")
         with tcol2:
@@ -630,6 +820,9 @@ with tab_leads:
             filter_email = st.toggle("有 Email", value=False, key="filter_email")
         with tcol4:
             filter_not_contacted = st.toggle("隱藏已聯繫", value=True, key="filter_contacted")
+        with tcol5:
+            filter_hot = st.toggle("只看熱門", value=False, key="filter_hot",
+                                   help="點過開發信連結的客戶")
 
         # ── 第二列：產業別 + 地區 ──
         icol, acol = st.columns(2)
@@ -682,6 +875,8 @@ with tab_leads:
         filtered = [c for c in filtered if c.get("email") and "@" in c.get("email", "")]
     if filter_not_contacted:
         filtered = [c for c in filtered if not c.get("contacted")]
+    if filter_hot:
+        filtered = [c for c in filtered if c.get("is_hot_lead")]
     if filter_sources:
         filtered = [c for c in filtered if c.get("source", "").upper() in filter_sources]
     if filter_industries:
@@ -706,8 +901,8 @@ with tab_leads:
         df = pd.DataFrame([
             {
                 "ID": c.get("id"),
-                "熱門": "🔥" if c.get("is_hot_lead") else "",
                 "公司名稱": c.get("cust_name", ""),
+                "熱門": "熱門" if c.get("is_hot_lead") else "",
                 "HR 姓名": c.get("hr_name") or "—",
                 "Email": c.get("email") or "—",
                 "驗證": EMAIL_STATUS_ICON.get(verify_map.get(c.get("id"), ""), ""),
@@ -749,15 +944,15 @@ with tab_leads:
             df,
             use_container_width=True,
             height=520,
-            disabled=["ID", "熱門", "公司名稱", "HR 姓名", "Email", "驗證", "電話",
+            disabled=["ID", "公司名稱", "熱門", "HR 姓名", "Email", "驗證", "電話",
                        "產業別", "員工數", "地址", "零食", "福利標籤",
                        "職缺連結", "公司頁面", "官網", "來源", "誰抓的", "首次爬取"],
             hide_index=True,
             column_config={
                 "ID":       st.column_config.NumberColumn(width="small"),
-                "熱門":     st.column_config.TextColumn(width="small",
-                            help="🔥 已點擊過開發信，優先跟進"),
                 "公司名稱": st.column_config.TextColumn(width="medium"),
+                "熱門":     st.column_config.TextColumn(width="small",
+                            help="點過開發信連結 = 熱門客戶，優先跟進"),
                 "HR 姓名":  st.column_config.TextColumn(width="small"),
                 "Email":    st.column_config.TextColumn(width="large"),
                 "驗證":     st.column_config.TextColumn(width="small",
@@ -810,26 +1005,99 @@ with tab_email:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Dry-run 測試模式 ──
-    _dry = st.toggle(
-        "🧪 **Dry-run 測試模式**（打開後按「確認寄出」不會真的寄，可放心測試流程）",
-        value=st.session_state.get("dry_run_mode", False),
-        key="dry_run_mode",
-    )
-    if _dry:
+    # ══════════════════════════════════════════════
+    # 🎬 新手示範：一鍵載入 10 家測試公司（email 分流到兩個真信箱）
+    # ══════════════════════════════════════════════
+    from database.db import get_stats as _db_get_stats
+    try:
+        _total_companies = _db_get_stats().get("total_companies", 0)
+    except Exception:
+        _total_companies = 0
+
+    _first_time = (_total_companies == 0)
+    with st.expander(
+        ("第一次用？載入 10 家示範公司試試看"
+         if _first_time else
+         "載入 10 家示範公司（測試用）"),
+        expanded=_first_time,
+    ):
         st.markdown(
-            """
-            <div style='background:rgba(168,85,247,0.08);border-left:3px solid #a855f7;
-                        padding:10px 14px;border-radius:0 8px 8px 0;font-size:0.82rem;
-                        margin-bottom:12px'>
-                🧪 <b>測試模式已開啟</b> — 所有「確認寄出」動作都會被攔截，
-                只記錄到活動 log、不會真的寄信給客戶。<br>
-                <span style='opacity:0.65;font-size:0.74rem'>
-                    建議步驟：(1) 先打開 dry-run 跑一輪完整流程 (2) 關閉 dry-run 後「寄測試信」給自己確認長相 (3) 開始真實寄送
-                </span>
-            </div>
-            """,
-            unsafe_allow_html=True,
+            "填你自己的 Gmail，系統會建 10 家測試公司到名單裡，"
+            "然後勾選它們按寄送，10 封信都會進到你信箱。"
+            "這是拿來試流程的，隨時可以清掉。"
+        )
+
+        # ── 兩個收件信箱：使用者自己填 ──
+        _default_primary = (
+            st.session_state.get("demo_inbox_primary")
+            or st.session_state.get("sender_email")
+            or ""
+        )
+        _default_secondary = st.session_state.get("demo_inbox_secondary", "")
+        _ic1, _ic2 = st.columns(2)
+        _demo_primary = _ic1.text_input(
+            "你的 Gmail（必填）",
+            value=_default_primary,
+            placeholder="you@gmail.com",
+            help="10 封信都會進到這個信箱，每封收件人會顯示不一樣的地址方便分辨",
+            key="demo_inbox_primary",
+        )
+        _demo_secondary = _ic2.text_input(
+            "第二個信箱（選填）",
+            value=_default_secondary,
+            placeholder="留空就全進主信箱；填了就後 5 封進這個",
+            help="想同時測兩個信箱就填",
+            key="demo_inbox_secondary",
+        )
+
+        _dc1, _dc2, _dc3 = st.columns([1, 1, 2])
+        if _dc1.button("載入 10 家示範公司", type="primary",
+                        use_container_width=True, key="btn_load_demo_email"):
+            try:
+                from demo_data import seed_demo_companies, build_demo_companies
+                _new_n, _upd_n = seed_demo_companies(
+                    inbox_primary=_demo_primary,
+                    inbox_secondary=_demo_secondary or None,
+                    crawled_by=st.session_state.get("username", "demo"),
+                )
+                st.success(
+                    f"已載入：新增 {_new_n} 家、更新 {_upd_n} 家。"
+                    "往下滾動找到「測試公司 01~10」→ 勾選 → 按寄送。"
+                )
+                with st.container():
+                    st.caption("10 封信會寄到下面這些地址（全部都進到你填的信箱）：")
+                    for _c in build_demo_companies(
+                        inbox_primary=_demo_primary,
+                        inbox_secondary=_demo_secondary or None,
+                    ):
+                        st.markdown(f"- **{_c['cust_name']}** → `{_c['email']}`")
+            except ValueError as _ve:
+                st.error(f"{_ve}")
+            except Exception as _e:
+                st.error(f"載入失敗：{_e}")
+        if _dc2.button("清除示範資料", use_container_width=True, key="btn_clear_demo_email"):
+            try:
+                from demo_data import clear_demo_companies
+                _n = clear_demo_companies()
+                # 清掉示範公司留下的寄信紀錄（company_id=0 的測試信 + 對應 events）
+                from database.db import get_connection as _cdc
+                _c = _cdc()
+                _seed_logs = _c.execute(
+                    "SELECT tracking_uid FROM email_logs "
+                    "WHERE company_id = 0 OR status = 'test'"
+                ).fetchall()
+                _seed_uids = [r[0] for r in _seed_logs if r[0]]
+                if _seed_uids:
+                    _q = ",".join("?" * len(_seed_uids))
+                    _c.execute(f"DELETE FROM email_events WHERE tracking_uid IN ({_q})", _seed_uids)
+                _c.execute("DELETE FROM email_logs WHERE company_id = 0 OR status = 'test'")
+                _c.commit()
+                st.success(f"已刪除 {_n} 家示範公司、相關測試寄信紀錄也清掉了")
+                st.rerun()
+            except Exception as _e:
+                st.error(f"清除失敗：{_e}")
+        _dc3.caption(
+            "示範公司和真實客戶是分開的，不會互相影響。"
         )
 
     # ── Gmail 設定 ──
@@ -936,11 +1204,7 @@ with tab_email:
                 placeholder="不選 = 全部地區",
             )
         with er4:
-            sc1, sc2 = st.columns(2)
-            with sc1:
-                email_filter_snack = st.toggle("🍿 有零食", value=False, key="ef_snack")
-            with sc2:
-                email_filter_hot = st.toggle("🔥 熱門", value=False, key="ef_hot")
+            email_filter_snack = st.toggle("有零食福利", value=False, key="ef_snack")
 
     # 從整個資料庫的有 email 公司開始篩（不再綁名單管理的篩選）
     email_targets = [c for c in companies if c.get("email") and "@" in c.get("email", "")]
@@ -956,8 +1220,6 @@ with tab_email:
         email_targets = [c for c in email_targets if _extract_city(c.get("address") or "") in email_filter_city]
     if email_filter_snack:
         email_targets = [c for c in email_targets if c.get("has_snack_benefit")]
-    if email_filter_hot:
-        email_targets = [c for c in email_targets if c.get("is_hot_lead")]
 
     # ── 即時顯示篩選結果數量（大顆顯眼）──
     _total_db = sum(1 for c in companies if c.get("email") and not c.get("contacted"))
@@ -1007,6 +1269,8 @@ with tab_email:
 ✦ 統一月結發票，省去採購麻煩
 ✦ 首月免費試用，確認滿意再合作
 
+完整服務介紹與產品目錄：https://leadgen.tw
+
 若有興趣，歡迎回信或來電洽談，期待有機會為 {company} 服務！
 
 祝商祺"""
@@ -1017,8 +1281,20 @@ with tab_email:
             )
             st.caption("可用變數：`{hr_name}`（HR 姓名）、`{company}`（公司名稱）")
             body_tpl = st.text_area(
-                "內文模板", value=DEFAULT_BODY, height=220, key="email_body"
+                "內文模板", value=DEFAULT_BODY, height=240, key="email_body"
             )
+
+            # 偵測模板裡有沒有 http(s) 連結
+            import re as _re
+            _has_link = bool(_re.search(r"https?://\S+", body_tpl))
+            if _has_link:
+                st.caption("✓ 模板有連結。客戶一點連結就會被標成「熱門客戶」，你會在「寄信成效」看到。")
+            else:
+                st.warning(
+                    "模板裡沒有放連結 — 這樣只能知道對方有沒有打開信，沒辦法知道有沒有興趣。\n"
+                    "建議貼一個官網或產品頁連結（例如：`https://leadgen.tw`），"
+                    "系統會自動改寫成追蹤網址。"
+                )
             st.caption("每封信會自動帶入對應公司資訊，你也可以在下方逐封修改。")
 
         st.markdown(f"""
@@ -1125,16 +1401,17 @@ with tab_email:
                 value=body_tpl.format(**ctx),
                 height=240,
                 key=f"send_body_{cursor}",
+                help="內文裡可以直接貼網址（公司簡介、產品頁、預約連結…）— 對方點開後會自動記錄到「寄信成效」，你能看到誰點了什麼連結。",
             )
+            st.caption("內文可放網址。寄出時會改寫成追蹤連結，對方一點你就會在「寄信成效」看到，那個客戶也會自動標成熱門。")
 
             # ── 操作按鈕 ──
             bc1, bc2, bc3, bc4 = st.columns([3, 2, 2, 1])
 
             def _do_send(to_email, subj, body, cid, cust_name, tpl):
                 """實際寄信。
-                - 真實寄 (cid truthy)：注入追蹤 → 寄 → log status='sent'
-                - 測試信 (cid=None)：注入追蹤 → 真的寄給自己 → log status='test'（算進追蹤分析讓使用者驗證追蹤正常）
-                - Dry-run：不真的寄 → log status='dry_run'（顯示在歷史紀錄但標記為模擬）
+                - 真實寄 (cid truthy)：注入 open pixel + 改寫連結 → 寄 → log status='sent'
+                - 測試信 (cid=None)：注入 open pixel + 改寫連結 → 真的寄給自己 → log status='test'
                 """
                 from database.db import log_activity, log_email_sent, mark_contacted
                 from mailer.tracking import gen_tracking_uid, inject_tracking
@@ -1144,23 +1421,11 @@ with tab_email:
                     TRACKING_BASE_URL = ""
                 _username = st.session_state.get("username", "")
 
-                # Dry-run：不真的寄，但寫 log 讓使用者看得到
-                if st.session_state.get("dry_run_mode", False):
-                    log_email_sent(
-                        company_id=cid or 0, recipient_email=to_email,
-                        subject=f"[模擬] {subj}", status="dry_run", template_used=tpl,
-                        tracking_uid="", sent_by=_username,
-                        body_snapshot=body, recipient_name=cust_name or "",
-                    )
-                    log_activity(_username, "dry_run_send",
-                                 f"[模擬] 寄給 {cust_name or to_email}")
-                    return True, f"🧪 [Dry-run] 模擬寄出成功 → {to_email}（未實際寄信，已寫入歷史紀錄）"
-
                 import os
                 os.environ["GMAIL_USER"]         = st.session_state.get("gmail_user", "")
                 os.environ["GMAIL_APP_PASSWORD"]  = st.session_state.get("gmail_pwd", "")
 
-                # 注入追蹤 pixel + 連結改寫（所有信都要，測試信也要）
+                # 注入開信 pixel + 改寫連結（需求規格第 8 項：開信/點擊追蹤）
                 uid = gen_tracking_uid() if TRACKING_BASE_URL else ""
                 body_to_send, is_html = inject_tracking(body, uid, TRACKING_BASE_URL, is_html=False)
 
@@ -1285,46 +1550,57 @@ with tab_history:
     </div>
     """, unsafe_allow_html=True)
 
-    from database.db import get_email_logs, get_email_log_stats
+    from database.db import get_email_logs, get_email_log_stats, get_connection as _hc
 
     logs_all = get_email_logs(limit=200)
     real_logs = [l for l in logs_all if l.get("status") in ("sent", "failed")]
     test_logs = [l for l in logs_all if l.get("status") == "test"]
-    dry_logs = [l for l in logs_all if l.get("status") == "dry_run"]
 
     if not logs_all:
         st.markdown("""
         <div class="empty-state">
             <div class="icon">📬</div>
-            <h3>還沒寄出過信件</h3>
-            <p>切到「開發信」分頁、挑選名單、按下寄送後，紀錄會自動出現在這裡</p>
-            <span class="hint">Dry-run 模擬、測試信、正式寄送都會在這裡顯示</span>
+            <h3>還沒寄過信</h3>
+            <p>去「開發信」挑公司按寄送，紀錄會自動出現</p>
         </div>
         """, unsafe_allow_html=True)
     else:
+        # 抓所有 tracking_uid 對應的 open 紀錄，一次性 merge
+        _uids = [l.get("tracking_uid") for l in logs_all if l.get("tracking_uid")]
+        _opened_uids = set()
+        if _uids:
+            _placeholders = ",".join("?" * len(_uids))
+            _rows = _hc().execute(
+                f"SELECT DISTINCT tracking_uid FROM email_events "
+                f"WHERE event_type IN ('open','click') AND tracking_uid IN ({_placeholders})",
+                _uids,
+            ).fetchall()
+            _opened_uids = {r[0] for r in _rows}
+
+        _open_count = sum(1 for l in logs_all if l.get("tracking_uid") in _opened_uids)
+
         lcol1, lcol2, lcol3, lcol4 = st.columns(4)
-        lcol1.metric("📧 正式寄出",
+        lcol1.metric("正式寄出",
                      sum(1 for l in real_logs if l.get("status") == "sent"))
-        lcol2.metric("❌ 寄送失敗",
+        lcol2.metric("被打開", _open_count)
+        lcol3.metric("寄送失敗",
                      sum(1 for l in real_logs if l.get("status") == "failed"))
-        lcol3.metric("🧪 測試信", len(test_logs))
-        lcol4.metric("🎭 Dry-run 模擬", len(dry_logs))
+        lcol4.metric("測試信", len(test_logs))
 
         _show_test = st.checkbox("顯示測試信", value=True, key="hist_show_test")
-        _show_dry = st.checkbox("顯示 Dry-run 模擬", value=True, key="hist_show_dry")
 
-        _status_label = {"sent": "✅ 正式", "failed": "❌ 失敗", "test": "🧪 測試", "dry_run": "🎭 模擬"}
+        _status_label = {"sent": "正式", "failed": "失敗", "test": "測試"}
         _filtered = [
             l for l in logs_all
             if l.get("status") in ("sent", "failed")
             or (l.get("status") == "test" and _show_test)
-            or (l.get("status") == "dry_run" and _show_dry)
         ]
         if _filtered:
             log_df = pd.DataFrame([
                 {
                     "時間": (log.get("sent_at") or "")[:16].replace("T", " "),
                     "類型": _status_label.get(log.get("status"), log.get("status", "")),
+                    "開信": "✓" if log.get("tracking_uid") in _opened_uids else "",
                     "公司": log.get("cust_name") or ("—" if not log.get("company_id") else f"ID:{log.get('company_id')}"),
                     "收件人": log.get("recipient_email", ""),
                     "主旨": log.get("subject", "")[:40],
@@ -1337,302 +1613,218 @@ with tab_history:
         else:
             st.info("沒有符合條件的紀錄")
 
-# ── TAB 5：追蹤分析（需求規格） ──
+
+# ── TAB 4b：寄信成效（需求規格） ──
 with tab_analytics:
-    st.markdown("""
-    <div class="section-header">
-        <h3>📈 信件追蹤</h3>
-        <span class="desc">每封寄出的信 — 寄給誰、什麼時候、內容、有沒有被打開、有沒有被點擊</span>
-    </div>
-    """, unsafe_allow_html=True)
+    _hc_top1, _hc_top2 = st.columns([5, 1], vertical_alignment="bottom")
+    with _hc_top1:
+        st.markdown("""
+        <div class="section-header">
+            <h3>寄信成效</h3>
+            <p class="section-sub">看每封信被打開沒、哪些連結被點了、哪些客戶最有興趣。客戶在信箱開信或點連結後，按右邊重新整理才會看到最新數字。</p>
+        </div>
+        """, unsafe_allow_html=True)
+    with _hc_top2:
+        if st.button("重新整理", key="analytics_refresh", use_container_width=True,
+                     help="客戶剛開信或點連結，按這個重抓資料"):
+            st.rerun()
 
-    from database.db import get_tracking_stats, get_template_stats, get_hot_leads, get_connection as _gc
-    try:
-        from config import TRACKING_BASE_URL
-    except ImportError:
-        TRACKING_BASE_URL = ""
+    from database.db import (
+        get_tracking_stats,
+        get_template_stats,
+        get_hot_leads,
+        get_events_for_uid,
+        get_email_logs as _ga_logs,
+    )
 
-    # ── 系統健康檢查（即時探測追蹤服務是否存活）──
-    _health_ok = False
-    _health_ms = 0
-    if TRACKING_BASE_URL:
-        try:
-            import requests as _rq
-            import time as _t
-            _t0 = _t.time()
-            _resp = _rq.get(f"{TRACKING_BASE_URL}/health", timeout=3)
-            _health_ms = int((_t.time() - _t0) * 1000)
-            _health_ok = _resp.status_code == 200 and _resp.json().get("ok")
-        except Exception as _e:
-            _health_ok = False
+    _tstats = get_tracking_stats()
 
-    if not TRACKING_BASE_URL:
-        st.error("🚫 **追蹤服務未設定** — 環境變數 `TRACKING_BASE_URL` 空白，寄出去的信不會被追蹤。")
-    elif _health_ok:
-        st.success(
-            f"✅ **追蹤服務正常運行中**　·　位址 `{TRACKING_BASE_URL}`　·　回應時間 {_health_ms}ms　·　系統有在跑 💯"
-        )
-    else:
-        st.warning(
-            f"⚠️ **追蹤服務失聯** — 已設位址 `{TRACKING_BASE_URL}` 但健康檢查失敗，請檢查 tracking_server 是否在跑。"
-        )
-
-    tstats = get_tracking_stats()
-
-    # ── 大型指標（搭配白話解釋）──
-    st.markdown("### 📊 總覽")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("📤 已寄出封數", tstats['sent'],
-              help="系統幫你追蹤的信件總數（真實寄出 + 測試信）")
-    m2.metric("👀 被打開信件數", tstats['opened'],
-              help="有多少封信被收件人點開來看")
-    m3.metric("🔗 有人點連結的信", tstats['clicked'],
-              help="開信之後，還進一步點了信裡連結的人數（最有興趣的客戶）")
-    m4.metric("🔥 熱門客戶數", tstats['hot_leads'],
-              help="只要點擊過任何一封信裡的連結，就會被標記為熱門客戶，可以優先跟進")
-
-    # 比率卡（用白話包裝）
-    if tstats['sent'] > 0:
-        st.markdown(f"""
-        <div style="background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;
-                    padding:14px 18px;border-radius:0 10px 10px 0;margin:12px 0 24px">
-            <div style="font-size:0.95rem;line-height:1.8">
-                寄出的 <b>{tstats['sent']}</b> 封信中，<b style="color:#22c55e">{tstats['opened']}</b> 封被打開（<b>{tstats['open_rate']}%</b> 開信率）、
-                <b style="color:#f59e0b">{tstats['clicked']}</b> 封有人點連結（<b>{tstats['click_rate']}%</b> 點擊率）。<br>
-                <span style="opacity:0.75;font-size:0.85rem">業界平均：冷信開信率 10-20% / 點擊率 1-5%。超過就是不錯的素材。</span>
-            </div>
+    if _tstats["sent"] == 0:
+        st.markdown("""
+        <div class="empty-state">
+            <div class="icon">📊</div>
+            <h3>還沒有成效資料</h3>
+            <p>寄出第一封信之後，這裡會顯示開信率、點擊率、最熱門的客戶</p>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.info("👇 還沒寄出過任何信。下面教你怎麼驗證系統真的有在跑。")
-
-    st.divider()
-
-    # ══════════════════════════════════════════════
-    # 🧪 批次測試工具：一次寄多封測試信，驗證真的有寄出
-    # ══════════════════════════════════════════════
-    with st.expander("🧪 批次測試工具 — 一次寄多封測試信給自己/同事，確認系統真的有寄出", expanded=False):
+        # ── KPI 卡 ──
+        _a_kpi = [
+            ("",       "寄出總數", _tstats["sent"],      "含測試信"),
+            ("blue",   "被打開",   _tstats["opened"],    f"開信率 {_tstats['open_rate']}%"),
+            ("violet", "點了連結", _tstats["clicked"],   f"點擊率 {_tstats['click_rate']}%"),
+            ("green",  "熱門客戶", _tstats["hot_leads"], "點過連結就算熱門"),
+        ]
         st.markdown(
-            "每行一個 Email。按下按鈕會一口氣寄給下列所有人，"
-            "可以拿來：**自測 10 封確認送達率**、**給同事看看我能不能收到**、**確認 Gmail 不會被標成垃圾信**。"
+            '<div class="kpi-strip">' + "".join(
+                f'<div class="kpi-cell {_c}">'
+                f'<div class="kpi-lbl">{_l}</div>'
+                f'<div class="kpi-val">{_v:,}</div>'
+                f'<div class="kpi-sub">{_s}</div>'
+                f'</div>'
+                for _c, _l, _v, _s in _a_kpi
+            ) + '</div>',
+            unsafe_allow_html=True,
         )
 
-        _default_batch = st.session_state.get("gmail_user", "")
-        _batch_emails_raw = st.text_area(
-            "收件人（每行一個）",
-            value=_default_batch,
-            height=140,
-            placeholder="you@example.com\nteammate@example.com\nboss@company.com",
-            key="batch_test_emails",
-        )
-        _batch_subj = st.text_input(
-            "主旨",
-            value="[測試] LeadFlow 送達測試信",
-            key="batch_test_subject",
-        )
-        _batch_body = st.text_area(
-            "內文",
-            value=(
-                "您好，\n\n"
-                "這是 LeadFlow 系統的送達測試信。\n"
-                "如果你收到這封信，代表從系統寄到你信箱的 pipeline 正常運作。\n\n"
-                "— 業務部門"
-            ),
-            height=140,
-            key="batch_test_body",
-        )
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-        _bc1, _bc2 = st.columns([1, 3])
-        _batch_go = _bc1.button("🚀 寄出批次測試", type="primary", use_container_width=True,
-                                 key="btn_batch_test")
-        _emails_parsed = [e.strip() for e in (_batch_emails_raw or "").splitlines()
-                          if e.strip() and "@" in e]
-        _bc2.caption(f"共 {len(_emails_parsed)} 個有效 Email 會寄出")
+        # ── 模板效果比較 ──
+        _tpl_rows = get_template_stats()
+        ac_tpl, ac_hot = st.columns([5, 4], gap="large")
 
-        if _batch_go:
-            if not _emails_parsed:
-                st.error("請至少輸入一個有效 Email")
-            elif not st.session_state.get("gmail_user") or not st.session_state.get("gmail_pwd"):
-                st.error("請先到「📨 開發信」頁設定 Gmail 帳號 / App Password")
+        with ac_tpl:
+            st.markdown("#### 不同模板比較")
+            if _tpl_rows:
+                tpl_df = pd.DataFrame([
+                    {
+                        "模板": r["template"],
+                        "寄出": r["sent"],
+                        "開信": r["opened"],
+                        "開信率": f"{r['open_rate']}%",
+                        "點擊": r["clicked"],
+                        "點擊率": f"{r['click_rate']}%",
+                    }
+                    for r in _tpl_rows
+                ])
+                st.dataframe(tpl_df, use_container_width=True, hide_index=True,
+                             height=min(320, 60 + 36 * len(tpl_df)))
+                st.caption("用哪個模板開信率最高、點擊率最高一眼看完")
             else:
-                _results = []
-                _progress = st.progress(0.0, text="準備寄送...")
-                import os as _os
-                _os.environ["GMAIL_USER"] = st.session_state.get("gmail_user", "")
-                _os.environ["GMAIL_APP_PASSWORD"] = st.session_state.get("gmail_pwd", "")
-                from mailer.gmail_sender import get_sender as _gs
-                from mailer.tracking import gen_tracking_uid as _gu, inject_tracking as _it
-                from database.db import log_email_sent as _les, log_activity as _lact
-                _sender = _gs()
-                _me_user = st.session_state.get("username", "")
-                for _i, _em in enumerate(_emails_parsed, 1):
-                    _progress.progress(_i / len(_emails_parsed),
-                                       text=f"寄送中 ({_i}/{len(_emails_parsed)})... {_em}")
-                    _uid = _gu() if TRACKING_BASE_URL else ""
-                    _body_final, _is_html = _it(_batch_body, _uid, TRACKING_BASE_URL, is_html=False)
-                    try:
-                        _ok, _msg = _sender.send_email(
-                            to=_em, subject=_batch_subj, body=_body_final,
-                            sender_name=st.session_state.get("sender_name", "業務部門"),
-                            html=_is_html,
-                        )
-                    except Exception as _err:
-                        _ok, _msg = False, str(_err)[:200]
-                    _les(
-                        company_id=0, recipient_email=_em,
-                        subject=f"[批次測試] {_batch_subj}",
-                        status="test" if _ok else "failed",
-                        error_message="" if _ok else _msg[:200],
-                        template_used="批次測試", tracking_uid=_uid,
-                        sent_by=_me_user, body_snapshot=_batch_body,
-                        recipient_name="(批次測試)",
-                    )
-                    _results.append({"email": _em, "ok": _ok, "msg": _msg})
-                _lact(_me_user, "batch_test",
-                      f"批次測試 {len(_emails_parsed)} 封 · 成功 {sum(1 for r in _results if r['ok'])}")
-                _progress.progress(1.0, text="完成！")
-                _ok_n = sum(1 for r in _results if r["ok"])
-                _fail_n = len(_results) - _ok_n
-                if _fail_n == 0:
-                    st.success(f"✅ 全部 {_ok_n} 封都已送出，去各自信箱看看有沒有收到")
+                st.caption("還沒有正式寄信的資料。寄過之後這裡會列出每個模板的成效。")
+
+        with ac_hot:
+            st.markdown("#### 熱門客戶")
+            _hot = get_hot_leads()
+            if _hot:
+                hot_df = pd.DataFrame([
+                    {
+                        "公司": h.get("cust_name", ""),
+                        "點擊數": h.get("click_count", 0),
+                        "開信數": h.get("open_count", 0),
+                        "最近互動": (h.get("last_event_at") or "")[:16].replace("T", " "),
+                        "HR Email": h.get("email") or "—",
+                    }
+                    for h in _hot
+                ])
+                st.dataframe(hot_df, use_container_width=True, hide_index=True,
+                             height=min(320, 60 + 36 * len(hot_df)))
+                st.caption("這些客戶點過你信裡的連結 — 優先聯繫他們")
+            else:
+                st.caption("還沒有客戶點過連結。客戶一點連結就會自動進這個列表。")
+
+        st.divider()
+
+        # ── 信件分區：未打開 / 已打開 / 已點擊 ──
+        st.markdown("#### 每封信的追蹤狀況")
+        st.caption("依狀態分三區，點任一封展開看收件人、打開時間、點過的連結、信的內容")
+
+        _all_logs = _ga_logs(limit=300)
+        _tracked_logs = [l for l in _all_logs if l.get("tracking_uid")]
+
+        if not _tracked_logs:
+            st.info("還沒有帶追蹤碼的寄信紀錄。")
+        else:
+            # 一次抓所有 uid 的 events，分類
+            _uid_list = [l["tracking_uid"] for l in _tracked_logs]
+            _q_marks = ",".join("?" * len(_uid_list))
+            from database.db import get_connection as _gc
+            _ev_rows = _gc().execute(
+                f"SELECT tracking_uid, event_type, occurred_at, target_url "
+                f"FROM email_events WHERE tracking_uid IN ({_q_marks}) "
+                f"ORDER BY occurred_at ASC",
+                _uid_list,
+            ).fetchall()
+            _by_uid = {}
+            for r in _ev_rows:
+                _by_uid.setdefault(r["tracking_uid"], []).append(dict(r))
+
+            _pending, _opened, _clicked = [], [], []
+            for l in _tracked_logs:
+                evs = _by_uid.get(l["tracking_uid"], [])
+                has_click = any(e["event_type"] == "click" for e in evs)
+                has_open  = any(e["event_type"] == "open"  for e in evs)
+                entry = (l, evs)
+                if has_click:
+                    _clicked.append(entry)
+                elif has_open:
+                    _opened.append(entry)
                 else:
-                    st.warning(f"✅ 成功 {_ok_n} · ❌ 失敗 {_fail_n}")
-                for _r in _results:
-                    if _r["ok"]:
-                        st.markdown(f"- ✅ `{_r['email']}` 已寄出")
+                    _pending.append(entry)
+
+            def _render_detail(_log, _evs):
+                _opens  = [e for e in _evs if e["event_type"] == "open"]
+                _clicks = [e for e in _evs if e["event_type"] == "click"]
+
+                dcol1, dcol2, dcol3 = st.columns(3)
+                dcol1.metric("被打開次數", len(_opens))
+                dcol2.metric("連結被點次數", len(_clicks))
+                dcol3.metric("狀態", "點過連結" if _clicks else ("已打開" if _opens else "尚未打開"))
+
+                m_meta, m_body = st.columns([1, 2], gap="large")
+                with m_meta:
+                    st.markdown("**基本資訊**")
+                    st.markdown(
+                        f"- 寄出時間：{(_log.get('sent_at') or '')[:19].replace('T', ' ')}\n"
+                        f"- 收件人：{_log.get('recipient_email', '—')}\n"
+                        f"- 公司：{_log.get('cust_name') or '—'}\n"
+                        f"- 模板：{_log.get('template_used') or '—'}\n"
+                        f"- 主旨：{_log.get('subject') or '—'}\n"
+                        f"- 寄件者：{_log.get('sent_by') or '—'}"
+                    )
+                    if _opens:
+                        st.markdown("**打開時間**")
+                        for _e in _opens[:20]:
+                            st.caption("· " + (_e.get("occurred_at") or "")[:19].replace("T", " "))
+                    if _clicks:
+                        st.markdown("**點過的連結**")
+                        for _e in _clicks[:20]:
+                            _u = _e.get("target_url") or ""
+                            _t = (_e.get("occurred_at") or "")[:16].replace("T", " ")
+                            st.caption(f"· {_t}  —  {_u[:70]}")
+                with m_body:
+                    st.markdown("**信的內容**")
+                    _body = _log.get("body_html")
+                    if _body:
+                        st.code(_body, language="html")
                     else:
-                        st.markdown(f"- ❌ `{_r['email']}` — {_r['msg'][:100]}")
-                st.caption("💡 提示：這些信會出現在下方「每封信詳細追蹤」表格，被打開會自動顯示 ✅")
+                        st.caption("（系統沒存下這封信的內容）")
 
-    st.divider()
+            def _render_section(title, entries, badge_color, hint):
+                _n = len(entries)
+                st.markdown(
+                    f"<div class='analytics-section-title'>"
+                    f"<span class='dot dot-{badge_color}'></span>"
+                    f"{title}"
+                    f"<span class='count-pill'>{_n}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                if not entries:
+                    st.caption(hint)
+                    return
+                for _log, _evs in entries:
+                    _t = (_log.get("sent_at") or "")[:16].replace("T", " ")
+                    _who = _log.get("cust_name") or _log.get("recipient_email", "—")
+                    _sub = (_log.get("subject") or "")[:40]
+                    _label = f"{_t}　·　{_who}　·　{_sub}"
+                    with st.expander(_label, expanded=False):
+                        _render_detail(_log, _evs)
 
-    # ══════════════════════════════════════════════
-    # 📋 每封信詳細追蹤（主表格）
-    # ══════════════════════════════════════════════
-    st.markdown("### 📋 每封信詳細追蹤")
-
-    _conn = _gc()
-    _all_logs = _conn.execute("""
-        SELECT id, sent_at, recipient_email, recipient_name, subject, status,
-               tracking_uid, sent_by, template_used, body_snapshot, error_message, company_id
-        FROM email_logs
-        ORDER BY sent_at DESC
-        LIMIT 100
-    """).fetchall()
-
-    if not _all_logs:
-        st.info("📭 還沒寄過任何信。上面的「批次測試工具」或「📨 開發信」tab 試著寄一封。")
-    else:
-        # Filter UI
-        fc1, fc2, fc3 = st.columns([2, 2, 3])
-        _f_status = fc1.multiselect(
-            "類型",
-            options=["sent", "test", "dry_run", "failed"],
-            default=["sent", "test"],
-            format_func=lambda x: {"sent": "📧 正式", "test": "🧪 測試",
-                                     "dry_run": "🎭 模擬", "failed": "❌ 失敗"}[x],
-            key="track_filter_status",
-        )
-        _f_only_opened = fc2.checkbox("只看已開啟的", value=False, key="track_filter_opened")
-        _f_search = fc3.text_input("搜尋收件人/主旨", placeholder="打字即時過濾",
-                                    key="track_filter_search")
-
-        # Build rows with open/click counts
-        _rows_out = []
-        for _l in _all_logs:
-            if _f_status and _l["status"] not in _f_status:
-                continue
-            _uid = _l["tracking_uid"] or ""
-            if _uid:
-                _opened_n = _conn.execute(
-                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='open'",
-                    (_uid,),
-                ).fetchone()[0]
-                _clicked_n = _conn.execute(
-                    "SELECT COUNT(*) FROM email_events WHERE tracking_uid=? AND event_type='click'",
-                    (_uid,),
-                ).fetchone()[0]
-            else:
-                _opened_n = _clicked_n = 0
-
-            if _f_only_opened and _opened_n == 0:
-                continue
-            if _f_search:
-                _s = _f_search.lower()
-                if _s not in (_l["recipient_email"] or "").lower() and \
-                   _s not in (_l["subject"] or "").lower() and \
-                   _s not in (_l["recipient_name"] or "").lower():
-                    continue
-            _rows_out.append((_l, _opened_n, _clicked_n))
-
-        st.caption(f"符合條件：{len(_rows_out)} 封")
-
-        # Render each row as expandable
-        for _l, _op_n, _cl_n in _rows_out[:50]:
-            _tag = {"sent": "📧 正式", "test": "🧪 測試",
-                     "dry_run": "🎭 模擬", "failed": "❌ 失敗"}.get(_l["status"], _l["status"])
-            _open_badge = f"👀 **{_op_n}** 次" if _op_n > 0 else "—"
-            _click_badge = f"🔗 **{_cl_n}** 次" if _cl_n > 0 else "—"
-            _title = (
-                f"{_tag}　·　{_l['sent_at'][:16].replace('T', ' ')}　·　"
-                f"→ {_l['recipient_email']}　·　開信 {_open_badge}　·　點擊 {_click_badge}"
-            )
-            with st.expander(_title, expanded=False):
-                mc1, mc2 = st.columns([2, 1])
-                with mc1:
-                    st.markdown(f"**主旨**：{_l['subject']}")
-                    if _l["recipient_name"]:
-                        st.markdown(f"**收件人名稱**：{_l['recipient_name']}")
-                    if _l["sent_by"]:
-                        st.markdown(f"**寄件操作者**：{_l['sent_by']}")
-                    if _l["template_used"]:
-                        st.markdown(f"**使用模板**：{_l['template_used']}")
-                    if _l["error_message"]:
-                        st.error(f"錯誤：{_l['error_message']}")
-                with mc2:
-                    if _l["tracking_uid"]:
-                        st.markdown(f"**追蹤 UID**：`{_l['tracking_uid'][:16]}…`")
-                        # 手動模擬工具
-                        mbc1, mbc2 = st.columns(2)
-                        if mbc1.button("🖼 模擬開啟", key=f"detail_sim_open_{_l['id']}",
-                                        use_container_width=True):
-                            from database.db import record_email_event
-                            record_email_event(_l["tracking_uid"], "open",
-                                                user_agent="self-test", ip_hash="manual")
-                            st.rerun()
-                        if mbc2.button("🔗 模擬點擊", key=f"detail_sim_click_{_l['id']}",
-                                        use_container_width=True):
-                            from database.db import record_email_event
-                            record_email_event(_l["tracking_uid"], "click",
-                                                target_url="manual-test",
-                                                user_agent="self-test", ip_hash="manual")
-                            st.rerun()
-                    else:
-                        st.caption("無追蹤 UID（dry_run 模式不注入追蹤）")
-
-                st.markdown("**信件內文**")
-                _body_snap = _l["body_snapshot"] or "（未保存內文）"
-                st.text_area("", value=_body_snap, height=180,
-                             key=f"detail_body_{_l['id']}",
-                             label_visibility="collapsed", disabled=True)
-
-                # 列出該信件的開信/點擊事件
-                if _l["tracking_uid"]:
-                    _events = _conn.execute("""
-                        SELECT event_type, occurred_at, target_url, ip_hash
-                        FROM email_events
-                        WHERE tracking_uid = ?
-                        ORDER BY occurred_at DESC
-                    """, (_l["tracking_uid"],)).fetchall()
-                    if _events:
-                        st.markdown("**事件紀錄**")
-                        for _ev in _events:
-                            _et = "👀 開啟" if _ev["event_type"] == "open" else "🔗 點擊"
-                            _url_part = f" → {_ev['target_url'][:80]}" if _ev["target_url"] else ""
-                            st.markdown(
-                                f"`{_ev['occurred_at'][:19].replace('T', ' ')}` "
-                                f"{_et}{_url_part}"
-                            )
+            _sec_tabs = st.tabs([
+                f"尚未打開 ({len(_pending)})",
+                f"已打開 ({len(_opened)})",
+                f"點過連結 ({len(_clicked)})",
+            ])
+            with _sec_tabs[0]:
+                _render_section("尚未打開", _pending, "gray",
+                                "目前每封信都至少被打開過了")
+            with _sec_tabs[1]:
+                _render_section("已打開（還沒點連結）", _opened, "blue",
+                                "目前沒有「只打開沒點連結」的信")
+            with _sec_tabs[2]:
+                _render_section("點過連結（熱門客戶）", _clicked, "green",
+                                "還沒有人點過你信裡的連結。模板裡要放連結才偵測得到。")
 
 
 # ── TAB 5：Gmail 設定教學 ──
@@ -1967,38 +2159,35 @@ if tab_admin is not None:
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("資料庫公司總數", f"{s['total']:,}", f"有 email {s['has_email']}")
             mc2.metric("本週寄信數",     total_sent_week, f"{len(week_senders)} 人活躍")
-            mc3.metric("本週爬蟲次數",   total_crawl_week, f"{len(week_crawlers)} 人操作")
+            mc3.metric("本週搜尋次數",   total_crawl_week, f"{len(week_crawlers)} 人操作")
             mc4.metric("總活動筆數",     f"{len(logs_all):,}", "最近 2000 筆")
 
             st.markdown("---")
 
             # 各使用者寄信成效圖表
-            st.markdown("#### 📧 各業務員寄信成效")
+            st.markdown("#### 各業務員寄信成效")
             if user_email:
                 _df = pd.DataFrame([
                     {
                         "使用者":   u["username"],
                         "寄出":     u["sent"],
                         "開信":     u["opened"] or 0,
-                        "點擊":     u["clicked"] or 0,
                         "開信率":   u["open_rate"],
-                        "點擊率":   u["click_rate"],
                     }
                     for u in user_email
                 ])
                 col_c, col_t = st.columns([2, 3])
                 with col_c:
-                    st.bar_chart(_df.set_index("使用者")[["寄出", "開信", "點擊"]], height=260)
+                    st.bar_chart(_df.set_index("使用者")[["寄出", "開信"]], height=260)
                 with col_t:
                     _df_display = _df.copy()
                     _df_display["開信率"] = _df_display["開信率"].map(lambda x: f"{x}%")
-                    _df_display["點擊率"] = _df_display["點擊率"].map(lambda x: f"{x}%")
                     st.dataframe(_df_display, use_container_width=True, hide_index=True,
                                  height=260)
             else:
                 st.info("還沒有人寄信")
 
-            st.markdown("#### 🕷 各業務員爬蟲貢獻（已累積在資料庫的公司）")
+            st.markdown("#### 各業務員找到的公司數")
             crawler_count = Counter(c.get("crawled_by") or "（未標記）" for c in all_comps)
             if crawler_count:
                 cr_df = pd.DataFrame(
@@ -2156,7 +2345,7 @@ if tab_admin is not None:
             for i, (lock, col) in enumerate([("crawl", lc1), ("email", lc2)]):
                 with col:
                     h = _glh2(lock)
-                    label = "爬蟲鎖" if lock == "crawl" else "寄信鎖"
+                    label = "搜尋中" if lock == "crawl" else "寄信中"
                     if h:
                         st.markdown(
                             f'<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);'
@@ -2197,14 +2386,14 @@ if tab_admin is not None:
             logs = get_activity_log(limit=200, username=filter_user.strip())
             if logs:
                 ACTION_ICON = {
-                    "login": "🔐 登入",
-                    "crawl": "🕷 爬蟲",
-                    "send_email": "📧 寄信",
-                    "export": "⬇ 匯出",
-                    "admin_add_user": "➕ 新增使用者",
-                    "scan_web": "🌐 官網掃描",
-                    "verify_email": "✅ 驗 email",
-                    "clear_db": "🗑 清資料庫",
+                    "login": "登入",
+                    "crawl": "找客戶",
+                    "send_email": "寄信",
+                    "export": "匯出",
+                    "admin_add_user": "新增使用者",
+                    "scan_web": "找 email",
+                    "verify_email": "驗 email",
+                    "clear_db": "清資料庫",
                 }
                 logs_df = pd.DataFrame([
                     {
@@ -2225,6 +2414,7 @@ if tab_admin is not None:
         with _admin_tabs[3]:
             st.warning("⚠️ 以下操作不可復原，請謹慎")
             dz1, dz2 = st.columns(2)
+
             with dz1:
                 if st.button("清空所有活動紀錄", key="admin_clear_activity",
                              use_container_width=True):
@@ -2233,8 +2423,42 @@ if tab_admin is not None:
                     get_connection().commit()
                     st.success("已清空活動紀錄")
                     st.rerun()
+
             with dz2:
-                st.caption("（之後視需求可加：清 email_logs / 備份匯出等）")
+                if st.button("清空所有寄信紀錄", key="admin_clear_emails",
+                             use_container_width=True):
+                    from database.db import get_connection as _gc_ae
+                    _c = _gc_ae()
+                    _c.execute("DELETE FROM email_events")
+                    _c.execute("DELETE FROM email_logs")
+                    _c.commit()
+                    st.success("已清空寄信紀錄與追蹤事件")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("**整個資料庫清空（重置系統）**")
+            st.caption("包含：所有公司、所有寄信紀錄、所有追蹤事件、熱門標記。爬蟲、活動紀錄、帳號不動。")
+
+            _confirm_key = "admin_wipe_confirm"
+            _confirm = st.text_input(
+                "要清空全部資料，在這格輸入「WIPE」確認",
+                key=_confirm_key,
+                placeholder="輸入 WIPE 才會啟用下面的按鈕",
+            )
+            if st.button(
+                "清空整個資料庫",
+                key="admin_wipe_all",
+                type="primary",
+                disabled=(_confirm.strip().upper() != "WIPE"),
+                use_container_width=True,
+            ):
+                from database.db import clear_all as _wipe_all, log_activity as _la
+                _wipe_all()
+                _la(st.session_state.get("username", ""), "wipe_db", "清空整個資料庫")
+                st.session_state.last_run_result = None
+                st.session_state[_confirm_key] = ""
+                st.success("資料庫已清空。")
+                st.rerun()
 
 
 # ── Footer ──
