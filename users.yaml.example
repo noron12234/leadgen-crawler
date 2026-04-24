@@ -1,0 +1,28 @@
+# LeadFlow 帳號設定範本 — 複製成 users.yaml 後自行填入真實資料
+# 禁止在 comment 寫明文密碼！
+# 產生 bcrypt hash：
+#   python -c "import bcrypt; print(bcrypt.hashpw(b'你的密碼', bcrypt.gensalt(12)).decode())"
+# 產生 cookie key：
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+
+credentials:
+  usernames:
+    admin:
+      name: 系統管理員
+      email: admin@example.com
+      role: superadmin
+      enabled: true
+      password: "REPLACE_WITH_BCRYPT_HASH"
+
+    # 業務帳號（視需要增刪）
+    # sales1:
+    #   name: 業務一號
+    #   email: sales1@example.com
+    #   role: user
+    #   enabled: true
+    #   password: "REPLACE_WITH_BCRYPT_HASH"
+
+cookie:
+  name: leadflow_auth
+  key: REPLACE_WITH_RANDOM_48_CHAR_STRING
+  expiry_days: 30

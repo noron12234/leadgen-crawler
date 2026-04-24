@@ -1,0 +1,42 @@
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# 本地資料 — 不要打包進 image
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 截圖與 QA
+截圖/
+data/qa/
+tools/qa_*.py
+
+# 測試 / 研究
+tests/research/
+
+# docs、截圖、暫時檔（docs 放文件但不需要上線）
+docs/
+*.md
+
+# 日誌
+*.log
+logs/
+
+# 敏感資訊
+.env
+.env.local
+credentials.json
+token.json
+users.yaml
+users.yaml.example
+
+.git
+.gitignore

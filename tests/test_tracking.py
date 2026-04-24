@@ -177,6 +177,21 @@ class TestTrackingDb:
         assert hot[0]["id"] == cid
         assert hot[0]["click_count"] == 1
 
+    def test_dedupe_same_ip_within_window(self, tmp_db, sample_companies):
+        """同 uid+type+ip 在 30 秒內視為同一次事件，避免洗 event"""
+        from database.db import record_email_event, get_tracking_stats
+        _, uid = self._seed_email(sample_companies)
+
+        record_email_event(uid, "open", user_agent="Real/1.0", ip_hash="abc123")
+        # 同 IP + 同 UID + 同 type 連續 → dedupe 只寫 1 筆
+        record_email_event(uid, "open", user_agent="Real/1.0", ip_hash="abc123")
+        record_email_event(uid, "open", user_agent="Real/1.0", ip_hash="abc123")
+        assert get_tracking_stats()["opened"] == 1
+
+        # 不同 IP 的開信另算
+        record_email_event(uid, "open", user_agent="Real/1.0", ip_hash="def456")
+        assert get_tracking_stats()["opened"] == 1  # distinct uid 計數仍 1（同封信）
+
     def test_invalid_event_type_is_ignored(self, tmp_db, sample_companies):
         from database.db import record_email_event, get_tracking_stats
         _, uid = self._seed_email(sample_companies)

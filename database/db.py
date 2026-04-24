@@ -634,6 +634,24 @@ def record_email_event(
         logger.info(f"略過反釣魚掃描器 open: uid={tracking_uid[:8]} ua={user_agent[:60]}")
         return
 
+    # Dedupe：同 uid+type+ip 在 30 秒內的重複事件視為同一次（擋洗 event DoS）
+    # ip_hash 空時跳過 dedupe（測試或無 IP 資訊的情境）
+    if ip_hash:
+        last = conn.execute(
+            "SELECT occurred_at FROM email_events "
+            "WHERE tracking_uid = ? AND event_type = ? AND ip_hash = ? "
+            "ORDER BY occurred_at DESC LIMIT 1",
+            (tracking_uid, event_type, ip_hash),
+        ).fetchone()
+        if last and last["occurred_at"]:
+            try:
+                last_at = datetime.fromisoformat(last["occurred_at"])
+                if (datetime.now() - last_at).total_seconds() < 30:
+                    logger.info(f"dedupe {event_type} event: uid={tracking_uid[:8]} ip_hash={ip_hash[:8]}")
+                    return
+            except (ValueError, TypeError):
+                pass
+
     conn.execute("""
         INSERT INTO email_events (tracking_uid, event_type, occurred_at, target_url, user_agent, ip_hash)
         VALUES (?, ?, ?, ?, ?, ?)
