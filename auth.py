@@ -5,11 +5,31 @@
 - bcrypt hashed passwords
 - 登入前顯示品牌封面
 """
+import os
 import streamlit as st
 import yaml
 from pathlib import Path
 
-_AUTH_FILE = Path(__file__).parent / "users.yaml"
+# users.yaml 優先順序：
+#   1. USERS_YAML_PATH 環境變數（CI / 客製部署）
+#   2. /data/users.yaml（Fly.io volume 持久化，重啟不遺失）
+#   3. feature1_lead_scraper/users.yaml（本地開發）
+# 此檔含 bcrypt hash + cookie 簽章 key，已被 .gitignore / .dockerignore 排除，
+# 不會進 git 也不會被 Docker image 打包。生產部署時上傳到 volume。
+def _resolve_auth_file() -> Path:
+    env_path = os.getenv("USERS_YAML_PATH", "").strip()
+    candidates = [
+        Path(env_path) if env_path else None,
+        Path("/data/users.yaml"),
+        Path(__file__).parent / "users.yaml",
+    ]
+    for p in candidates:
+        if p and p.exists():
+            return p
+    return candidates[-1]  # 本地預設（讓 UI 顯示「尚未設定帳號」提示）
+
+
+_AUTH_FILE = _resolve_auth_file()
 
 
 def _render_login_hero():
