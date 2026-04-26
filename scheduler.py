@@ -190,17 +190,19 @@ def start_scheduler(
         misfire_grace_time=3600,
     )
 
-    next_crawl = scheduler.get_job("weekly_crawl").next_run_time
-    next_backup = scheduler.get_job("daily_backup").next_run_time
     logger.info(f"排程器啟動：")
-    logger.info(f"  每週爬蟲 → 週{day_of_week} {hour:02d}:{minute:02d}（下次：{next_crawl}）")
-    logger.info(f"  每日備份 → 12:00（下次：{next_backup}）")
+    logger.info(f"  每週爬蟲 → 週{day_of_week} {hour:02d}:{minute:02d}")
+    logger.info(f"  每日備份 → 12:00")
     logger.info("按 Ctrl+C 停止排程器")
 
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("排程器已停止")
+    except Exception as e:
+        # 不讓 supervisord 因小錯誤無限重啟把 log 灌爆，記錄後正常結束讓人介入
+        logger.error(f"排程器發生錯誤：{e}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
