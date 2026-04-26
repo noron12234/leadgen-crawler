@@ -364,7 +364,9 @@ with _nav_left:
 with _nav_right:
     # 在線人數 + 使用者名稱 + 登出按鈕
     try:
-        from database.db import get_online_users as _gou
+        from database.db import get_online_users as _gou, heartbeat as _hb
+        # 每次 rerun 打一次心跳，60s 內有心跳的使用者算「在線」
+        _hb(st.session_state.get("username", ""))
         _online = _gou()
         _online_n = len(_online)
     except Exception:
@@ -2133,6 +2135,27 @@ if tab_admin is not None:
 
         # ──────── 1. 儀表板 ────────
         with _admin_tabs[0]:
+            # ── 目前在線 ──
+            from database.db import get_online_users as _gou_admin
+            _now_online = _gou_admin()
+            st.markdown("#### 目前在線")
+            if _now_online:
+                online_df = pd.DataFrame([
+                    {
+                        "使用者":     u["username"],
+                        "最後活動":   (u.get("last_heartbeat") or "")[:19].replace("T", " "),
+                        "目前頁面":   u.get("current_page") or "—",
+                    }
+                    for u in _now_online
+                ])
+                st.dataframe(online_df, use_container_width=True, hide_index=True,
+                             height=min(260, 50 + 36 * len(online_df)))
+                st.caption(f"共 {len(online_df)} 人 · 3 分鐘內有活動算在線（沒人按按鈕只是看頁面也會超時）")
+            else:
+                st.info("目前只有你登入。其他人沒上線或閒置超過 3 分鐘。")
+
+            st.markdown("---")
+
             s = _db_stats()
             all_comps = _all_c()
             user_email = get_user_email_breakdown()
