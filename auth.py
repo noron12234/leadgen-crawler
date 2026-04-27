@@ -465,11 +465,13 @@ def check_auth() -> bool:
 
     # 未登入 → 顯示封面 + 登入表單
     _render_login_hero()
-    authenticator.login(location="main")
+    # max_login_attempts=5：同一帳號連續輸錯 5 次密碼後被鎖定，需 reset failed_login_attempts
+    # 防暴力破解（attacker 用機器掃 admin/sales1/sales2 + 字典攻擊）
+    authenticator.login(location="main", max_login_attempts=5)
     _render_login_footer()
 
     if st.session_state.get("authentication_status") is False:
-        st.error("帳號或密碼錯誤")
+        st.error("帳號或密碼錯誤（連續錯 5 次該帳號會被鎖，請聯繫管理員）")
         st.stop()
         return False
     else:
