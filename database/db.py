@@ -239,6 +239,23 @@ def _run_migrations(conn: sqlite3.Connection):
         _set_schema_version(conn, 6)
         logger.info("Migration v6: email_logs 加 body_snapshot + recipient_name")
 
+    if current < 7:
+        # v7: 範本版本管理 — 存多版本 + 用 template_used 串到 email_logs 做成效追蹤
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_templates (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
+                subject     TEXT NOT NULL,
+                body        TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                created_by  TEXT DEFAULT '',
+                is_archived INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tpl_archived ON email_templates(is_archived)")
+        _set_schema_version(conn, 7)
+        logger.info("Migration v7: email_templates 表（範本版本管理）")
+
     conn.commit()
 
 
@@ -582,6 +599,52 @@ def clear_all():
     conn.execute("DELETE FROM companies")
     conn.commit()
     logger.info("資料庫已清空")
+
+
+# ══════════════════════════════════════════════════════
+# 範本版本管理（feature #5）
+# ══════════════════════════════════════════════════════
+
+def save_template(name: str, subject: str, body: str, username: str = "") -> int:
+    """存範本。同名會覆蓋（UPSERT 概念，用 INSERT OR REPLACE）。"""
+    init_db()
+    if not name.strip():
+        raise ValueError("範本名稱不可空")
+    now = datetime.now().isoformat()
+    conn = get_connection()
+    cur = conn.execute("""
+        INSERT INTO email_templates (name, subject, body, created_at, created_by, is_archived)
+        VALUES (?, ?, ?, ?, ?, 0)
+        ON CONFLICT(name) DO UPDATE SET
+            subject = excluded.subject,
+            body = excluded.body,
+            created_at = excluded.created_at,
+            created_by = excluded.created_by,
+            is_archived = 0
+    """, (name.strip(), subject, body, now, username))
+    conn.commit()
+    row = conn.execute("SELECT id FROM email_templates WHERE name = ?", (name.strip(),)).fetchone()
+    return row["id"] if row else cur.lastrowid
+
+
+def get_templates(include_archived: bool = False) -> list[dict]:
+    """取得所有範本，最新在前。"""
+    init_db()
+    conn = get_connection()
+    sql = "SELECT * FROM email_templates"
+    if not include_archived:
+        sql += " WHERE is_archived = 0"
+    sql += " ORDER BY created_at DESC"
+    rows = conn.execute(sql).fetchall()
+    return [dict(r) for r in rows]
+
+
+def archive_template(template_id: int):
+    """軟刪除範本（保留歷史成效資料）。"""
+    init_db()
+    conn = get_connection()
+    conn.execute("UPDATE email_templates SET is_archived = 1 WHERE id = ?", (template_id,))
+    conn.commit()
 
 
 # ══════════════════════════════════════════════════════

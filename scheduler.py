@@ -209,6 +209,13 @@ if __name__ == "__main__":
     # 確保 data/ 目錄存在
     os.makedirs("data", exist_ok=True)
 
+    # Staging 環境只保留 daily backup，不自動爬蟲（避免燒 bycrawl 額度 + 拿 staging 數據混淆 prod 判斷）
+    if os.getenv("STAGING_MODE") == "1" and len(sys.argv) == 1:
+        import time
+        logger.info("STAGING_MODE=1 — 跳過排程器，sleep 保持 supervisord 滿意")
+        while True:
+            time.sleep(3600)
+
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
         if cmd == "now":

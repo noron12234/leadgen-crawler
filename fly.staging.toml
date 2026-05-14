@@ -1,0 +1,56 @@
+# Fly.io 部署設定 — LeadFlow Staging（測試環境）
+# 與 prod (fly.toml) 唯一差別：
+#   - app 名稱：leadgen-staging
+#   - 預設 STAGING_MODE=1 → scheduler.py 不會自動爬蟲
+#   - 同樣的 volume 命名 (leadflow_data) 但因為 app 不同所以是獨立 volume
+# 用法：flyctl deploy --config fly.staging.toml
+
+app = "leadgen-staging"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  STAGING_MODE = "1"
+
+# ── 對外主服務：Streamlit ──
+[http_service]
+  internal_port = 8501
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+# ── 第二個對外 port：追蹤 pixel server ──
+[[services]]
+  internal_port = 8503
+  protocol = "tcp"
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 8443
+    handlers = ["tls", "http"]
+    force_https = true
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+# ── 持久儲存：SQLite DB（與 prod 同名但因為 app 不同，是獨立 volume）──
+[[mounts]]
+  source = "leadflow_data"
+  destination = "/data"
+
+# ── 資源配置 ──
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

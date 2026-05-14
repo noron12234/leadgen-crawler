@@ -258,6 +258,21 @@ def to_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def parse_emails(email_str: str) -> list[str]:
+    """解析 company.email 欄位（可能是逗號/分號/空白分隔的多 email）→ 回傳乾淨 list。
+    第一個是「主要」、後面是「次要」。"""
+    if not email_str:
+        return []
+    import re as _re_pe
+    parts = _re_pe.split(r"[,;\s]+", email_str.strip())
+    out = []
+    for p in parts:
+        p = p.strip().strip(".,;")
+        if "@" in p and p not in out:
+            out.append(p)
+    return out
+
+
 # 爬蟲進度區 slot 改到 control panel 下方建立（見下面 CONTROL PANEL 區塊）
 
 
@@ -859,6 +874,71 @@ with tab_leads:
                 key="filter_city",
             )
 
+    # ── 📥 匯入 Excel/CSV 名單 ──
+    with st.expander("📥 匯入名單（Excel / CSV）", expanded=False):
+        st.caption("欄位對應：公司名稱（必須）/ Email / 聯絡人 / 電話 / 產業 / 地址 / 來源。"
+                   "其他欄位會略過。重名公司會合併（補空欄位、不覆蓋已有資料）。")
+        _imp_file = st.file_uploader(
+            "選檔（.xlsx / .csv）",
+            type=["xlsx", "xls", "csv"],
+            key="leads_import_file",
+        )
+        if _imp_file is not None:
+            try:
+                if _imp_file.name.lower().endswith(".csv"):
+                    _imp_df = pd.read_csv(_imp_file)
+                else:
+                    _imp_df = pd.read_excel(_imp_file)
+            except Exception as _e_imp:
+                st.error(f"讀檔失敗：{_e_imp}")
+                _imp_df = None
+
+            if _imp_df is not None:
+                st.write(f"預覽前 5 筆（共 {len(_imp_df)} 筆）：")
+                st.dataframe(_imp_df.head(), use_container_width=True, hide_index=True)
+
+                _col_alias = {
+                    "公司名稱": "cust_name", "公司名": "cust_name", "公司": "cust_name",
+                    "名稱": "cust_name", "客戶名稱": "cust_name", "客戶": "cust_name",
+                    "Email": "email", "email": "email", "信箱": "email", "電子信箱": "email",
+                    "聯絡人": "hr_name", "HR": "hr_name", "姓名": "hr_name", "聯絡": "hr_name",
+                    "電話": "phone", "Phone": "phone", "聯絡電話": "phone",
+                    "產業": "industry", "Industry": "industry",
+                    "地址": "address", "Address": "address",
+                    "來源": "source", "Source": "source",
+                    "網站": "website", "官網": "website", "Website": "website",
+                }
+                # 自動 mapping
+                _mapped_df = _imp_df.rename(columns=lambda c: _col_alias.get(str(c).strip(), str(c).strip()))
+
+                if "cust_name" not in _mapped_df.columns:
+                    st.error("找不到「公司名稱」欄位。請確認 Excel 有「公司」或「公司名稱」這個欄位。")
+                else:
+                    _i_btn1, _i_btn2 = st.columns([1, 3])
+                    with _i_btn1:
+                        if st.button("🚀 匯入", type="primary", key="leads_do_import",
+                                     use_container_width=True):
+                            _cleaned = []
+                            for _row in _mapped_df.to_dict(orient="records"):
+                                _cleaned.append({
+                                    "cust_name": str(_row.get("cust_name", "") or "").strip(),
+                                    "email": str(_row.get("email", "") or "").strip(),
+                                    "hr_name": str(_row.get("hr_name", "") or "").strip(),
+                                    "phone": str(_row.get("phone", "") or "").strip(),
+                                    "industry": str(_row.get("industry", "") or "").strip(),
+                                    "address": str(_row.get("address", "") or "").strip(),
+                                    "website": str(_row.get("website", "") or "").strip(),
+                                    "source": str(_row.get("source", "") or "import").strip().upper(),
+                                })
+                            _cleaned = [c for c in _cleaned if c["cust_name"]]
+                            _new_n, _upd_n = upsert_companies(
+                                _cleaned, crawled_by=st.session_state.get("username", "")
+                            )
+                            st.success(f"✅ 匯入完成：新增 {_new_n} 筆 / 更新 {_upd_n} 筆")
+                            st.rerun()
+                    with _i_btn2:
+                        st.caption("匯入後系統會自動依公司名稱去重；email 欄位支援多 email（用逗號分隔）。")
+
     # 套用篩選
     filtered = companies[:]
     if filter_snack:
@@ -1200,10 +1280,58 @@ with tab_email:
         with er4:
             email_filter_snack = st.toggle("有零食福利", value=False, key="ef_snack")
 
+    # ── 🔍 比對 Ragic / 已合作客戶名單（排除這些公司不寄）──
+    with st.expander("🔍 比對 Ragic 客戶名單（排除已合作公司）", expanded=False):
+        st.caption("上傳 Ragic 客戶 Excel/CSV（要有「公司名稱」欄位）。系統會依公司名稱比對，"
+                   "排除這些公司不出現在批量寄送清單。")
+        _rag_file = st.file_uploader(
+            "Ragic 客戶 Excel/CSV",
+            type=["xlsx", "xls", "csv"],
+            key="ragic_exclude_file",
+        )
+        _exc_col1, _exc_col2 = st.columns([3, 1])
+        if _rag_file is not None:
+            try:
+                if _rag_file.name.lower().endswith(".csv"):
+                    _rag_df = pd.read_csv(_rag_file)
+                else:
+                    _rag_df = pd.read_excel(_rag_file)
+                _name_col = None
+                for _c in _rag_df.columns:
+                    if str(_c).strip() in ("公司名稱", "公司名", "公司", "客戶名稱", "客戶"):
+                        _name_col = _c
+                        break
+                if _name_col is None:
+                    st.error("找不到「公司名稱」欄位，請確認 Ragic 匯出表有這欄。")
+                else:
+                    from processors.cleaner import _normalize_name as _norm
+                    _names = _rag_df[_name_col].dropna().astype(str).tolist()
+                    _exc_set = {_norm(n) for n in _names if n.strip()}
+                    st.session_state["ragic_excluded_names"] = _exc_set
+                    _exc_col1.success(f"已載入 {len(_exc_set)} 家 Ragic 客戶，下方寄送清單會自動排除")
+                    if _exc_col2.button("清掉排除清單", key="ragic_clear"):
+                        st.session_state.pop("ragic_excluded_names", None)
+                        st.rerun()
+            except Exception as _e_rag:
+                st.error(f"讀檔失敗：{_e_rag}")
+        else:
+            _exc_set_cur = st.session_state.get("ragic_excluded_names")
+            if _exc_set_cur:
+                _exc_col1.info(f"目前排除 {len(_exc_set_cur)} 家（之前載入的清單仍生效）")
+                if _exc_col2.button("清掉排除清單", key="ragic_clear2"):
+                    st.session_state.pop("ragic_excluded_names", None)
+                    st.rerun()
+
     # 從整個資料庫的有 email 公司開始篩（不再綁名單管理的篩選）
     email_targets = [c for c in companies if c.get("email") and "@" in c.get("email", "")]
     # 排除已聯繫
     email_targets = [c for c in email_targets if not c.get("contacted")]
+    # 排除 Ragic 客戶
+    _ragic_set = st.session_state.get("ragic_excluded_names") or set()
+    if _ragic_set:
+        from processors.cleaner import _normalize_name as _norm_filter
+        email_targets = [c for c in email_targets
+                         if _norm_filter(c.get("cust_name", "")) not in _ragic_set]
     # 套用條件
     if email_search.strip():
         q = email_search.strip().lower()
@@ -1269,16 +1397,58 @@ with tab_email:
 
 祝商祺"""
 
-        with st.expander("✏️ 信件模板（所有信件的初始內容）", expanded=False):
+        # ── 範本版本管理 ──
+        from database.db import get_templates as _get_tpls, save_template as _save_tpl, archive_template as _arc_tpl
+        _all_templates = _get_tpls()
+        _tpl_options = ["（預設 — 未存）"] + [t["name"] for t in _all_templates]
+
+        _tpl_col1, _tpl_col2 = st.columns([3, 2])
+        with _tpl_col1:
+            _selected_tpl = st.selectbox(
+                "📝 信件範本（選不同版本可比較成效）",
+                _tpl_options,
+                key="tpl_selector",
+                help="存多個版本後，在「寄信成效」可以看到每版的開信率/點擊率",
+            )
+        with _tpl_col2:
+            _sub_col1, _sub_col2 = st.columns(2)
+            _sub_col1.caption(f"目前 {len(_all_templates)} 個版本")
+            if _selected_tpl != "（預設 — 未存）":
+                if _sub_col2.button("🗑 封存", key="tpl_archive", help="軟刪除，舊紀錄保留"):
+                    _t_id = next((t["id"] for t in _all_templates if t["name"] == _selected_tpl), None)
+                    if _t_id:
+                        _arc_tpl(_t_id)
+                        st.session_state["tpl_selector"] = "（預設 — 未存）"
+                        st.session_state.pop("_last_tpl_loaded", None)
+                        st.rerun()
+
+        # 選變了：把範本套到 subject/body 欄位
+        if _selected_tpl != st.session_state.get("_last_tpl_loaded"):
+            st.session_state["_last_tpl_loaded"] = _selected_tpl
+            if _selected_tpl == "（預設 — 未存）":
+                st.session_state["email_subject"] = DEFAULT_SUBJECT
+                st.session_state["email_body"] = DEFAULT_BODY
+            else:
+                _tpl_obj = next((t for t in _all_templates if t["name"] == _selected_tpl), None)
+                if _tpl_obj:
+                    st.session_state["email_subject"] = _tpl_obj["subject"]
+                    st.session_state["email_body"] = _tpl_obj["body"]
+            st.rerun()
+
+        with st.expander("✏️ 編輯範本內容（這裡改完按「存為版本」才會保留）", expanded=False):
             subject_tpl = st.text_input(
-                "主旨模板", value=DEFAULT_SUBJECT, key="email_subject"
+                "主旨模板",
+                value=st.session_state.get("email_subject", DEFAULT_SUBJECT),
+                key="email_subject",
             )
             st.caption("可用變數：`{hr_name}`（HR 姓名）、`{company}`（公司名稱）")
             body_tpl = st.text_area(
-                "內文模板", value=DEFAULT_BODY, height=240, key="email_body"
+                "內文模板",
+                value=st.session_state.get("email_body", DEFAULT_BODY),
+                height=240,
+                key="email_body",
             )
 
-            # 偵測模板裡有沒有 http(s) 連結
             import re as _re
             _has_link = bool(_re.search(r"https?://\S+", body_tpl))
             if _has_link:
@@ -1289,7 +1459,35 @@ with tab_email:
                     "建議貼一個官網或產品頁連結（例如：`https://leadgen.tw`），"
                     "系統會自動改寫成追蹤網址。"
                 )
+
+            # 存為新版本
+            _save_col1, _save_col2 = st.columns([3, 1])
+            with _save_col1:
+                _new_tpl_name = st.text_input(
+                    "存為新版本（命名）",
+                    value=(_selected_tpl if _selected_tpl != "（預設 — 未存）" else ""),
+                    key="tpl_new_name",
+                    placeholder="例：v1_短版 / v2_含優惠碼 / 春節版",
+                )
+            with _save_col2:
+                if st.button("💾 存為版本", key="tpl_save_btn", use_container_width=True):
+                    if not _new_tpl_name.strip():
+                        st.warning("請輸入範本名稱")
+                    else:
+                        try:
+                            _save_tpl(_new_tpl_name.strip(), subject_tpl, body_tpl,
+                                      st.session_state.get("username", ""))
+                            st.success(f"✅ 已存為「{_new_tpl_name}」")
+                            st.session_state["tpl_selector"] = _new_tpl_name.strip()
+                            st.session_state["_last_tpl_loaded"] = _new_tpl_name.strip()
+                            st.rerun()
+                        except Exception as _e_save:
+                            st.error(f"存範本失敗：{_e_save}")
+
             st.caption("每封信會自動帶入對應公司資訊，你也可以在下方逐封修改。")
+
+        # 寄信時這個 name 會寫入 email_logs.template_used，成效 tab 可以分組
+        _tpl_name_for_log = (_selected_tpl if _selected_tpl != "（預設 — 未存）" else "(預設未命名)")
 
         st.markdown(f"""
         <div class="section-header">
@@ -1320,6 +1518,63 @@ with tab_email:
                 """,
                 unsafe_allow_html=True,
             )
+
+        # ── 統一寄信函數（單封 + 批量共用）──
+        def _do_send(to_email, subj, body, cid, cust_name, tpl):
+            """實際寄信。
+            - 真實寄 (cid truthy)：注入 open pixel + 改寫連結 → 寄 → log status='sent'
+            - 測試信 (cid=None)：注入 open pixel + 改寫連結 → 真的寄給自己 → log status='test'
+            """
+            from database.db import log_activity, log_email_sent, mark_contacted
+            from mailer.tracking import gen_tracking_uid, inject_tracking
+            try:
+                from config import TRACKING_BASE_URL
+            except ImportError:
+                TRACKING_BASE_URL = ""
+            _username = st.session_state.get("username", "")
+
+            import os
+            os.environ["GMAIL_USER"]         = st.session_state.get("gmail_user", "")
+            os.environ["GMAIL_APP_PASSWORD"]  = st.session_state.get("gmail_pwd", "")
+
+            uid = gen_tracking_uid() if TRACKING_BASE_URL else ""
+            body_to_send, is_html = inject_tracking(body, uid, TRACKING_BASE_URL, is_html=False)
+
+            from mailer.gmail_sender import get_sender
+            sender = get_sender()
+            ok, msg = sender.send_email(
+                to=to_email, subject=subj, body=body_to_send,
+                sender_name=st.session_state.get("sender_name", "業務部門"),
+                html=is_html,
+            )
+            if ok:
+                if cid:
+                    log_email_sent(
+                        company_id=cid, recipient_email=to_email,
+                        subject=subj, status="sent", template_used=tpl,
+                        tracking_uid=uid, sent_by=_username,
+                        body_snapshot=body, recipient_name=cust_name or "",
+                    )
+                    mark_contacted(cid)
+                    log_activity(_username, "send_email",
+                                 f"寄給 {cust_name or to_email}")
+                else:
+                    log_email_sent(
+                        company_id=0, recipient_email=to_email,
+                        subject=f"[測試] {subj}", status="test",
+                        template_used=tpl, tracking_uid=uid, sent_by=_username,
+                        body_snapshot=body, recipient_name="(自己)",
+                    )
+                    log_activity(_username, "send_test_email",
+                                 f"[測試] 寄給 {to_email}（追蹤 uid={uid[:8]}）")
+            else:
+                log_email_sent(
+                    company_id=cid or 0, recipient_email=to_email,
+                    subject=subj, status="failed", error_message=msg[:200],
+                    template_used=tpl, tracking_uid=uid, sent_by=_username,
+                    body_snapshot=body, recipient_name=cust_name or "",
+                )
+            return ok, msg
 
         # ── 游標 ──
         if "email_cursor" not in st.session_state:
@@ -1360,9 +1615,14 @@ with tab_email:
                 tag_spans = "".join(f'<span class="ep-tag">{t}</span>' for t in welfare_tags[:6])
                 tags_html = f'<div class="ep-tags">{tag_spans}</div>'
 
+            _target_emails = parse_emails(target.get("email", ""))
+            _emails_disp = (
+                f"{_target_emails[0]} <span style='opacity:0.55;font-size:0.78rem'>＋{len(_target_emails)-1} 個次要</span>"
+                if len(_target_emails) > 1 else (_target_emails[0] if _target_emails else "（無）")
+            )
             meta_row = (
                 f"<b>收件人：</b>{target.get('hr_name') or '（無姓名）'} &nbsp;·&nbsp; "
-                f"<b>Email：</b>{target.get('email', '')} &nbsp;·&nbsp; "
+                f"<b>Email：</b>{_emails_disp} &nbsp;·&nbsp; "
                 f"{target.get('industry', '') or '—'} &nbsp;·&nbsp; "
                 f"{target.get('employee_count', '') or '—'} 人"
             )
@@ -1399,100 +1659,79 @@ with tab_email:
             )
             st.caption("內文可放網址。寄出時會改寫成追蹤連結，對方一點你就會在「寄信成效」看到，那個客戶也會自動標成熱門。")
 
+            # ── 多 email 公司：選擇要寄哪些 ──
+            if len(_target_emails) > 1:
+                _send_emails = st.multiselect(
+                    f"這家公司有 {len(_target_emails)} 個 email，要寄到哪幾個？",
+                    options=_target_emails,
+                    default=[_target_emails[0]],
+                    key=f"send_email_pick_{cursor}",
+                    help="預設只寄主要（第一個）。勾選多個會分別寄出、各自追蹤開信。",
+                )
+            else:
+                _send_emails = _target_emails
+
             # ── 操作按鈕 ──
             bc1, bc2, bc3, bc4 = st.columns([3, 2, 2, 1])
 
-            def _do_send(to_email, subj, body, cid, cust_name, tpl):
-                """實際寄信。
-                - 真實寄 (cid truthy)：注入 open pixel + 改寫連結 → 寄 → log status='sent'
-                - 測試信 (cid=None)：注入 open pixel + 改寫連結 → 真的寄給自己 → log status='test'
-                """
-                from database.db import log_activity, log_email_sent, mark_contacted
-                from mailer.tracking import gen_tracking_uid, inject_tracking
-                try:
-                    from config import TRACKING_BASE_URL
-                except ImportError:
-                    TRACKING_BASE_URL = ""
-                _username = st.session_state.get("username", "")
-
-                import os
-                os.environ["GMAIL_USER"]         = st.session_state.get("gmail_user", "")
-                os.environ["GMAIL_APP_PASSWORD"]  = st.session_state.get("gmail_pwd", "")
-
-                # 注入開信 pixel + 改寫連結（需求規格第 8 項：開信/點擊追蹤）
-                uid = gen_tracking_uid() if TRACKING_BASE_URL else ""
-                body_to_send, is_html = inject_tracking(body, uid, TRACKING_BASE_URL, is_html=False)
-
-                from mailer.gmail_sender import get_sender
-                sender = get_sender()
-                ok, msg = sender.send_email(
-                    to=to_email, subject=subj, body=body_to_send,
-                    sender_name=st.session_state.get("sender_name", "業務部門"),
-                    html=is_html,
-                )
-                if ok:
-                    if cid:
-                        # 真實寄給客戶
-                        log_email_sent(
-                            company_id=cid, recipient_email=to_email,
-                            subject=subj, status="sent", template_used=tpl,
-                            tracking_uid=uid, sent_by=_username,
-                            body_snapshot=body, recipient_name=cust_name or "",
-                        )
-                        mark_contacted(cid)
-                        log_activity(_username, "send_email",
-                                     f"寄給 {cust_name or to_email}")
-                    else:
-                        # 測試信寄給自己 → 也寫 email_logs 讓追蹤分析能看到，方便自驗
-                        log_email_sent(
-                            company_id=0, recipient_email=to_email,
-                            subject=f"[測試] {subj}", status="test",
-                            template_used=tpl, tracking_uid=uid, sent_by=_username,
-                            body_snapshot=body, recipient_name="(自己)",
-                        )
-                        log_activity(_username, "send_test_email",
-                                     f"[測試] 寄給 {to_email}（追蹤 uid={uid[:8]}）")
-                else:
-                    # 失敗也寫 log
-                    log_email_sent(
-                        company_id=cid or 0, recipient_email=to_email,
-                        subject=subj, status="failed", error_message=msg[:200],
-                        template_used=tpl, tracking_uid=uid, sent_by=_username,
-                        body_snapshot=body, recipient_name=cust_name or "",
-                    )
-                return ok, msg
-
             with bc1:
-                can_send, _, _ = can_send_emails(1)
-                _btn_disabled = (not can_send) or _mail_locked_by_other
+                _n_to_send = max(len(_send_emails), 1)
+                can_send, _, _ = can_send_emails(_n_to_send)
+                _no_email = len(_send_emails) == 0
+                _btn_disabled = (not can_send) or _mail_locked_by_other or _no_email
                 _btn_label = (
                     "⏳ 其他人寄信中" if _mail_locked_by_other
-                    else ("⛔ 今日超量" if not can_send else "✅ 確認寄出")
+                    else ("⛔ 沒選 email" if _no_email
+                          else ("⛔ 今日超量" if not can_send
+                                else (f"✅ 確認寄出 {_n_to_send} 封" if _n_to_send > 1 else "✅ 確認寄出")))
                 )
                 if st.button(_btn_label, type="primary", key=f"btn_send_{cursor}",
                              disabled=_btn_disabled, use_container_width=True):
-                    # 取寄信鎖
                     _ok_lock, _lock_msg = _al("email", _me_mail,
                                                 note=f"寄信給 {target.get('cust_name','')}")
                     if not _ok_lock:
                         st.error(f"無法寄信：{_lock_msg}")
                     else:
                         try:
-                            ok, msg = _do_send(
-                                target["email"], edit_subject, edit_body,
-                                target.get("id"), target.get("cust_name"), subject_tpl,
-                            )
-                            if ok:
-                                st.success(f"✅ 已寄出給 {target.get('cust_name')} ({target['email']})")
+                            _send_results = []
+                            for _email_addr in _send_emails:
+                                _ok, _msg = _do_send(
+                                    _email_addr, edit_subject, edit_body,
+                                    target.get("id"), target.get("cust_name"), _tpl_name_for_log,
+                                )
+                                _send_results.append((_email_addr, _ok, _msg))
+                            _ok_n = sum(1 for _, o, _ in _send_results if o)
+                            _fail_n = len(_send_results) - _ok_n
+                            if _ok_n and not _fail_n:
+                                st.success(f"✅ 已寄出給 {target.get('cust_name')}（{_ok_n} 個 email）")
                                 st.session_state.email_cursor = cursor + 1
                                 st.rerun()
+                            elif _ok_n and _fail_n:
+                                st.warning(f"部分成功：{_ok_n} 成功 / {_fail_n} 失敗。失敗詳情："
+                                           + "; ".join(f"{e}:{m}" for e, o, m in _send_results if not o))
                             else:
-                                st.error(f"寄送失敗：{msg}")
+                                st.error("全部寄送失敗：" + "; ".join(f"{e}:{m}" for e, _, m in _send_results))
                         finally:
                             _rl("email", _me_mail)
 
             with bc2:
                 if st.button("⏭ 跳過這封", key=f"btn_skip_{cursor}", use_container_width=True):
+                    try:
+                        from database.db import log_email_sent as _log_skip, log_activity as _log_act
+                        _u_skip = st.session_state.get("username", "")
+                        _log_skip(
+                            company_id=target.get("id") or 0,
+                            recipient_email=target.get("email", "") or "",
+                            subject=edit_subject,
+                            status="skipped",
+                            template_used=_tpl_name_for_log,
+                            sent_by=_u_skip,
+                            recipient_name=target.get("cust_name") or "",
+                        )
+                        _log_act(_u_skip, "skip_email",
+                                 f"跳過 {target.get('cust_name') or target.get('email')}")
+                    except Exception as _e_skip:
+                        logger.warning(f"記錄跳過失敗：{_e_skip}")
                     st.session_state.email_cursor = cursor + 1
                     st.rerun()
 
@@ -1526,7 +1765,7 @@ with tab_email:
                             test_email,
                             f"[測試] {edit_subject}",
                             edit_body,
-                            None, None, subject_tpl,
+                            None, None, _tpl_name_for_log,
                         )
                         if ok:
                             st.success(f"測試信已寄到 {test_email}，去收信確認吧！")
@@ -1534,6 +1773,132 @@ with tab_email:
                             st.error(f"寄送失敗：{msg}")
                     else:
                         st.warning("請輸入有效的 Email 地址")
+
+        # ══════════════════════════════════════════════════════
+        # 📦 批量寄送模式 — 勾選多筆一次寄
+        # ══════════════════════════════════════════════════════
+        st.divider()
+        with st.expander(f"📦 批量寄送（從目前 {len(email_targets)} 家裡勾選多筆）", expanded=False):
+            st.caption("勾選下表多列 → 系統用上方「信件模板」自動套用 {hr_name}/{company} 寄給每一家。"
+                       "為避免 Gmail 異常登入鎖、每封間隔 2 秒。")
+
+            _batch_df = pd.DataFrame([
+                {
+                    "公司": t.get("cust_name") or "—",
+                    "Email": (lambda emls: emls[0] + (f" (+{len(emls)-1})" if len(emls) > 1 else ""))(parse_emails(t.get("email", ""))) if parse_emails(t.get("email", "")) else "",
+                    "聯絡人": t.get("hr_name") or "—",
+                    "產業": t.get("industry") or "—",
+                    "_target_id": i,
+                }
+                for i, t in enumerate(email_targets)
+            ])
+
+            _selection = st.dataframe(
+                _batch_df.drop(columns=["_target_id"]),
+                use_container_width=True,
+                height=320,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key="batch_picker",
+            )
+            _selected_rows = _selection.selection.rows if _selection else []
+            _selected_targets = [email_targets[i] for i in _selected_rows]
+
+            # 多 email 寄信策略
+            _multi_strategy = st.radio(
+                "多 email 公司怎麼寄？",
+                ["只寄主要 email", "寄給所有 email"],
+                horizontal=True,
+                key="batch_multi_strategy",
+            )
+
+            # 計算實際會寄出的總封數（多 email 公司會發多封）
+            _actual_emails = []  # list of (target, email_addr)
+            for _t in _selected_targets:
+                _emls = parse_emails(_t.get("email", ""))
+                if not _emls:
+                    continue
+                if _multi_strategy == "寄給所有 email":
+                    for _e in _emls:
+                        _actual_emails.append((_t, _e))
+                else:
+                    _actual_emails.append((_t, _emls[0]))
+
+            _bcol1, _bcol2, _bcol3 = st.columns([2, 2, 3])
+            _bcol1.metric("已選公司", len(_selected_targets))
+            _can_bulk, _bulk_left, _bulk_quota = can_send_emails(len(_actual_emails) or 1)
+            _bcol2.metric("實際寄出 / 剩餘", f"{len(_actual_emails)} / {_bulk_left}")
+
+            with _bcol3:
+                _bulk_disabled = (
+                    len(_actual_emails) == 0
+                    or not _can_bulk
+                    or _mail_locked_by_other
+                )
+                _bulk_label = (
+                    "勾選至少一筆" if not _actual_emails
+                    else ("⏳ 其他人寄信中" if _mail_locked_by_other
+                          else (f"⛔ 超量（剩 {_bulk_left}）" if not _can_bulk
+                                else f"✅ 批量寄出 {len(_actual_emails)} 封"))
+                )
+
+                if st.button(_bulk_label, type="primary", key="btn_batch_send",
+                             disabled=_bulk_disabled, use_container_width=True):
+                    _bulk_username = st.session_state.get("username", "")
+                    _ok_lock, _lock_msg = _al("email", _me_mail,
+                                              note=f"批量寄信 {len(_actual_emails)} 封")
+                    if not _ok_lock:
+                        st.error(f"無法寄信：{_lock_msg}")
+                    else:
+                        try:
+                            import time as _t_batch
+                            _prog = st.progress(0, text="準備批量寄送...")
+                            _bulk_results = {"sent": 0, "failed": 0, "errors": []}
+                            _total = len(_actual_emails)
+                            for _i, (_bt, _email_to) in enumerate(_actual_emails):
+                                _ctx = {
+                                    "hr_name": _bt.get("hr_name") or "您好",
+                                    "company": _bt.get("cust_name") or "貴公司",
+                                }
+                                try:
+                                    _bs = subject_tpl.format(**_ctx)
+                                    _bb = body_tpl.format(**_ctx)
+                                except Exception as _e_fmt:
+                                    _bulk_results["failed"] += 1
+                                    _bulk_results["errors"].append(
+                                        f"{_bt.get('cust_name')}: 模板套用失敗 ({_e_fmt})"
+                                    )
+                                    continue
+                                _ok, _msg = _do_send(
+                                    _email_to, _bs, _bb,
+                                    _bt.get("id"), _bt.get("cust_name"), _tpl_name_for_log,
+                                )
+                                if _ok:
+                                    _bulk_results["sent"] += 1
+                                else:
+                                    _bulk_results["failed"] += 1
+                                    _bulk_results["errors"].append(
+                                        f"{_bt.get('cust_name')} ({_email_to}): {_msg}"
+                                    )
+                                _prog.progress((_i + 1) / _total,
+                                               text=f"第 {_i+1} / {_total} 封：{_bt.get('cust_name')} → {_email_to}")
+                                if _i < _total - 1:
+                                    _t_batch.sleep(2)  # 間隔避免被 Gmail 擋
+                            _prog.empty()
+                            st.success(
+                                f"批量寄送完成：✅ {_bulk_results['sent']} 成功 "
+                                f"／ ❌ {_bulk_results['failed']} 失敗"
+                            )
+                            if _bulk_results["errors"]:
+                                with st.expander(f"看 {_bulk_results['failed']} 筆失敗詳情"):
+                                    for _err in _bulk_results["errors"]:
+                                        st.write(f"- {_err}")
+                            from database.db import log_activity as _la_bulk
+                            _la_bulk(_bulk_username, "bulk_send",
+                                     f"批量 {_bulk_results['sent']}/{_total} 成功")
+                        finally:
+                            _rl("email", _me_mail)
 
 
 # ── TAB 4：歷史紀錄 ──
@@ -1549,6 +1914,7 @@ with tab_history:
     logs_all = get_email_logs(limit=200)
     real_logs = [l for l in logs_all if l.get("status") in ("sent", "failed")]
     test_logs = [l for l in logs_all if l.get("status") == "test"]
+    skipped_logs = [l for l in logs_all if l.get("status") == "skipped"]
 
     if not logs_all:
         st.markdown("""
@@ -1559,35 +1925,46 @@ with tab_history:
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 抓所有 tracking_uid 對應的 open 紀錄，一次性 merge
+        # 抓所有 tracking_uid 對應的 open / click 紀錄
         _uids = [l.get("tracking_uid") for l in logs_all if l.get("tracking_uid")]
         _opened_uids = set()
+        _clicked_uids = set()
         if _uids:
             _placeholders = ",".join("?" * len(_uids))
             _rows = _hc().execute(
-                f"SELECT DISTINCT tracking_uid FROM email_events "
+                f"SELECT tracking_uid, event_type FROM email_events "
                 f"WHERE event_type IN ('open','click') AND tracking_uid IN ({_placeholders})",
                 _uids,
             ).fetchall()
-            _opened_uids = {r[0] for r in _rows}
+            for _u, _ev in _rows:
+                if _ev == "open":
+                    _opened_uids.add(_u)
+                elif _ev == "click":
+                    _clicked_uids.add(_u)
+                    _opened_uids.add(_u)  # 點過必然開過
 
         _open_count = sum(1 for l in logs_all if l.get("tracking_uid") in _opened_uids)
+        _click_count = sum(1 for l in logs_all if l.get("tracking_uid") in _clicked_uids)
 
-        lcol1, lcol2, lcol3, lcol4 = st.columns(4)
+        lcol1, lcol2, lcol3, lcol4, lcol5 = st.columns(5)
         lcol1.metric("正式寄出",
                      sum(1 for l in real_logs if l.get("status") == "sent"))
         lcol2.metric("被打開", _open_count)
         lcol3.metric("寄送失敗",
                      sum(1 for l in real_logs if l.get("status") == "failed"))
         lcol4.metric("測試信", len(test_logs))
+        lcol5.metric("已跳過", len(skipped_logs))
 
-        _show_test = st.checkbox("顯示測試信", value=True, key="hist_show_test")
+        _filter_col1, _filter_col2 = st.columns(2)
+        _show_test = _filter_col1.checkbox("顯示測試信", value=True, key="hist_show_test")
+        _show_skipped = _filter_col2.checkbox("顯示已跳過", value=True, key="hist_show_skipped")
 
-        _status_label = {"sent": "正式", "failed": "失敗", "test": "測試"}
+        _status_label = {"sent": "正式", "failed": "失敗", "test": "測試", "skipped": "已跳過"}
         _filtered = [
             l for l in logs_all
             if l.get("status") in ("sent", "failed")
             or (l.get("status") == "test" and _show_test)
+            or (l.get("status") == "skipped" and _show_skipped)
         ]
         if _filtered:
             log_df = pd.DataFrame([
@@ -1595,6 +1972,7 @@ with tab_history:
                     "時間": (log.get("sent_at") or "")[:16].replace("T", " "),
                     "類型": _status_label.get(log.get("status"), log.get("status", "")),
                     "開信": "✓" if log.get("tracking_uid") in _opened_uids else "",
+                    "點連結": "✓" if log.get("tracking_uid") in _clicked_uids else "",
                     "公司": log.get("cust_name") or ("—" if not log.get("company_id") else f"ID:{log.get('company_id')}"),
                     "收件人": log.get("recipient_email", ""),
                     "主旨": log.get("subject", "")[:40],
@@ -1604,6 +1982,35 @@ with tab_history:
                 for log in _filtered
             ])
             st.dataframe(log_df, use_container_width=True, height=400, hide_index=True)
+
+            # ── 匯出 Excel ──
+            st.markdown("##### 下載寄信歷史")
+            _dl_col1, _dl_col2 = st.columns([2, 3])
+            _dl_scope = _dl_col1.radio(
+                "下載範圍",
+                ["全部目前顯示", "只有開信過", "只有點連結過"],
+                horizontal=False,
+                key="hist_dl_scope",
+                label_visibility="collapsed",
+            )
+            if _dl_scope == "只有開信過":
+                _dl_df = log_df[log_df["開信"] == "✓"]
+            elif _dl_scope == "只有點連結過":
+                _dl_df = log_df[log_df["點連結"] == "✓"]
+            else:
+                _dl_df = log_df
+            with _dl_col2:
+                if len(_dl_df) > 0:
+                    st.download_button(
+                        label=f"⬇ 匯出 Excel（{len(_dl_df)} 筆）",
+                        data=to_excel(_dl_df),
+                        file_name=f"寄信歷史_{_dl_scope}_{time.strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="hist_excel_download",
+                    )
+                else:
+                    st.caption(f"目前篩選後沒有符合「{_dl_scope}」的紀錄")
         else:
             st.info("沒有符合條件的紀錄")
 
