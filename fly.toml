@@ -33,7 +33,7 @@ primary_region = "nrt"         # Tokyo（台灣訪問延遲最低）
   [[services.ports]]
     port = 8443
     handlers = ["tls", "http"]
-    force_https = true
+    # 注意：tls handler 在的話 fly 拒收 force_https = true（會被視為衝突）
 
   [services.concurrency]
     type = "connections"

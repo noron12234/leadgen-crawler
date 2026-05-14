@@ -37,7 +37,7 @@ primary_region = "nrt"
   [[services.ports]]
     port = 8443
     handlers = ["tls", "http"]
-    force_https = true
+    # tls handler 在的話 fly 拒收 force_https = true
 
   [services.concurrency]
     type = "connections"

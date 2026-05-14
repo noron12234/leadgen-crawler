@@ -1925,31 +1925,59 @@ with tab_history:
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 抓所有 tracking_uid 對應的 open / click 紀錄
+        # 抓 open / click 紀錄；open 套用預掃過濾
+        # 預掃定義：寄出 <10s OR (<60s 且 UA 含 GoogleImageProxy)
         _uids = [l.get("tracking_uid") for l in logs_all if l.get("tracking_uid")]
         _opened_uids = set()
+        _opened_raw_uids = set()  # 原始（含預掃）— 給 diagnostic 用
         _clicked_uids = set()
         if _uids:
             _placeholders = ",".join("?" * len(_uids))
+            # 帶上 sent_at + UA 才能判斷預掃
             _rows = _hc().execute(
-                f"SELECT tracking_uid, event_type FROM email_events "
-                f"WHERE event_type IN ('open','click') AND tracking_uid IN ({_placeholders})",
+                f"""SELECT ev.tracking_uid, ev.event_type, ev.user_agent, ev.occurred_at, el.sent_at
+                    FROM email_events ev
+                    LEFT JOIN email_logs el ON ev.tracking_uid = el.tracking_uid
+                    WHERE ev.event_type IN ('open','click')
+                      AND ev.tracking_uid IN ({_placeholders})""",
                 _uids,
             ).fetchall()
-            for _u, _ev in _rows:
-                if _ev == "open":
-                    _opened_uids.add(_u)
-                elif _ev == "click":
+            from datetime import datetime as _dt_pf
+            for _u, _ev, _ua, _occ, _sent in _rows:
+                if _ev == "click":
                     _clicked_uids.add(_u)
-                    _opened_uids.add(_u)  # 點過必然開過
+                    _opened_uids.add(_u)  # 點過必然真開
+                    _opened_raw_uids.add(_u)
+                else:  # open
+                    _opened_raw_uids.add(_u)
+                    _is_prefetch = False
+                    try:
+                        _d = (_dt_pf.fromisoformat(_occ) - _dt_pf.fromisoformat(_sent)).total_seconds()
+                    except Exception:
+                        _d = 9999
+                    _ua_l = (_ua or "").lower()
+                    if _d < 10:
+                        _is_prefetch = True
+                    elif _d < 60 and "googleimageproxy" in _ua_l:
+                        _is_prefetch = True
+                    elif any(p in _ua_l for p in ("proofpoint", "mimecast", "safelinks", "barracuda")):
+                        _is_prefetch = True
+                    if not _is_prefetch:
+                        _opened_uids.add(_u)
 
         _open_count = sum(1 for l in logs_all if l.get("tracking_uid") in _opened_uids)
         _click_count = sum(1 for l in logs_all if l.get("tracking_uid") in _clicked_uids)
+        _open_raw_count = sum(1 for l in logs_all if l.get("tracking_uid") in _opened_raw_uids)
+        _prefetch_count = _open_raw_count - _open_count
 
         lcol1, lcol2, lcol3, lcol4, lcol5 = st.columns(5)
         lcol1.metric("正式寄出",
                      sum(1 for l in real_logs if l.get("status") == "sent"))
-        lcol2.metric("被打開", _open_count)
+        lcol2.metric("被打開",
+                     _open_count,
+                     delta=f"-{_prefetch_count} 預掃" if _prefetch_count else None,
+                     delta_color="off",
+                     help="只算「真實開信」— 寄出 10 秒後、且不是 Google 反釣魚預掃的 open 事件才算。")
         lcol3.metric("寄送失敗",
                      sum(1 for l in real_logs if l.get("status") == "failed"))
         lcol4.metric("測試信", len(test_logs))
@@ -2052,7 +2080,9 @@ with tab_analytics:
         # ── KPI 卡 ──
         _a_kpi = [
             ("",       "寄出總數", _tstats["sent"],      "含測試信"),
-            ("blue",   "被打開",   _tstats["opened"],    f"開信率 {_tstats['open_rate']}%"),
+            ("blue",   "確認開信",   _tstats["opened"],
+                f"開信率 {_tstats['open_rate']}% "
+                f"（原始 {_tstats['opened_raw']} 筆，過濾掉 {_tstats['prefetch_filtered']} 筆預掃）"),
             ("violet", "點了連結", _tstats["clicked"],   f"點擊率 {_tstats['click_rate']}%"),
             ("green",  "熱門客戶", _tstats["hot_leads"], "點過連結就算熱門"),
         ]

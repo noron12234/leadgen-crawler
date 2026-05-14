@@ -730,25 +730,68 @@ def record_email_event(
     conn.commit()
 
 
+# ──────────────────────────────────────────────────────
+# 預掃過濾邏輯
+# ──────────────────────────────────────────────────────
+# 問題：Gmail 收信時，伺服器端反釣魚 / image proxy 會「預先抓 pixel」
+#       導致客戶根本沒打開、系統卻記為已開信。
+# 過濾規則（任一條成立視為預掃）：
+#   1. 寄出後 < 10 秒就 open → 99% 是 Google 伺服器預掃
+#   2. 寄出後 < 60 秒 且 UA 含 GoogleImageProxy / ggpht.com → 同上
+#   3. UA 為已知反釣魚產品（既有 _SCANNER_UA_PATTERNS）
+# Click 事件不過濾 — 機器掃描不會點連結，所有 click 都是真實互動。
+_PROXY_UA_PATTERNS = ("googleimageproxy", "ggpht.com",
+                      "microsoft outlook protection", "atplinks", "safelinks")
+
+_REAL_OPEN_SQL = """
+    SELECT DISTINCT ev.tracking_uid
+    FROM email_events ev
+    JOIN email_logs el ON ev.tracking_uid = el.tracking_uid
+    WHERE ev.event_type IN ('open','click')
+      AND el.tracking_uid IS NOT NULL AND el.tracking_uid != ''
+      AND (
+          ev.event_type = 'click'
+          OR (
+              (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) >= 10
+              AND NOT (
+                  LOWER(COALESCE(ev.user_agent, '')) LIKE '%googleimageproxy%'
+                  AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) < 60
+              )
+              AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%proofpoint%'
+              AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%mimecast%'
+              AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%barracuda%'
+              AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%symantec%'
+              AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%sophos%'
+              AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%safelinks%'
+          )
+      )
+"""
+
+_ALL_OPEN_SQL = """
+    SELECT DISTINCT tracking_uid FROM email_events
+    WHERE event_type IN ('open','click')
+"""
+
+
 def get_tracking_stats() -> dict:
     """
     整體追蹤統計：開信率、點擊率、熱門客戶數
-    （點了連結視同打開過 — Gmail 某些情境 pixel 會被擋但連結仍可追，
-      或客戶先關圖片再點連結，都仍應算「看過信」）
+    返回兩種開信數：
+      - opened: 過濾預掃後的「確認開信」（KPI 用）
+      - opened_raw: 不過濾的原始事件（diagnostic）
+    Click 不過濾 — 點連結必須真人。
     """
     init_db()
     conn = get_connection()
     sent = conn.execute(
         "SELECT COUNT(*) FROM email_logs WHERE status IN ('sent','test') AND tracking_uid IS NOT NULL AND tracking_uid != ''"
     ).fetchone()[0]
-    # 打開 = 有 open 事件 OR 有 click 事件（點連結也算看過信）
-    opened = conn.execute("""
-        SELECT COUNT(DISTINCT tracking_uid) FROM email_events
-        WHERE event_type IN ('open','click')
-    """).fetchone()[0]
-    clicked = conn.execute("""
-        SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='click'
-    """).fetchone()[0]
+
+    opened = conn.execute(f"SELECT COUNT(*) FROM ({_REAL_OPEN_SQL})").fetchone()[0]
+    opened_raw = conn.execute(f"SELECT COUNT(*) FROM ({_ALL_OPEN_SQL})").fetchone()[0]
+    clicked = conn.execute(
+        "SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='click'"
+    ).fetchone()[0]
     hot = conn.execute("SELECT COUNT(*) FROM companies WHERE is_hot_lead = 1").fetchone()[0]
 
     def _pct(n, d):
@@ -757,25 +800,43 @@ def get_tracking_stats() -> dict:
     return {
         "sent": sent,
         "opened": opened,
+        "opened_raw": opened_raw,
+        "prefetch_filtered": opened_raw - opened,
         "clicked": clicked,
         "hot_leads": hot,
         "open_rate": _pct(opened, sent),
+        "open_rate_raw": _pct(opened_raw, sent),
         "click_rate": _pct(clicked, sent),
         "click_to_open_rate": _pct(clicked, opened),
     }
 
 
 def get_template_stats() -> list[dict]:
-    """各模板成效比較：寄出 / 開信 / 點擊"""
+    """各模板成效比較：寄出 / 開信（過濾預掃）/ 點擊"""
     init_db()
     conn = get_connection()
+    # 同樣套用 _REAL_OPEN_SQL 的過濾邏輯：早於 10s 或 GoogleImageProxy 預掃不算
     rows = conn.execute("""
         SELECT
             COALESCE(NULLIF(template_used, ''), '（未分類）') AS template,
             COUNT(*) AS sent,
             SUM(CASE WHEN EXISTS (
-                SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid
-                  AND ev.event_type IN ('open','click')
+                SELECT 1 FROM email_events ev
+                WHERE ev.tracking_uid = el.tracking_uid
+                  AND (
+                    ev.event_type = 'click'
+                    OR (
+                      ev.event_type = 'open'
+                      AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) >= 10
+                      AND NOT (
+                        LOWER(COALESCE(ev.user_agent, '')) LIKE '%googleimageproxy%'
+                        AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) < 60
+                      )
+                      AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%proofpoint%'
+                      AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%mimecast%'
+                      AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%safelinks%'
+                    )
+                  )
             ) THEN 1 ELSE 0 END) AS opened,
             SUM(CASE WHEN EXISTS (
                 SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid AND ev.event_type='click'
