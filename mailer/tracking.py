@@ -46,18 +46,29 @@ def rewrite_links(html: str, uid: str, base_url: str) -> str:
 
 
 def inject_pixel(html: str, uid: str, base_url: str) -> str:
-    """在 HTML body 末端注入 1x1 透明追蹤 pixel"""
+    """在 HTML body 末端注入 1x1 透明追蹤 pixel + 退訂 footer
+
+    退訂 footer 配合 SMTP 端 List-Unsubscribe header 一起降低被 Gmail 進促銷分頁的機率。
+    """
     base = base_url.rstrip("/")
     pixel = (
         f'<img src="{base}/t/open/{uid}.gif" '
         f'width="1" height="1" alt="" '
         f'style="display:block;width:1px;height:1px;border:0;" />'
     )
+    # 退訂提示 — 一句話，直接告訴對方回信退訂；Gmail 看到「unsubscribe」線索會降促銷分頁機率
+    unsub_footer = (
+        '<div style="margin-top:28px;padding-top:12px;border-top:1px solid #eaeaea;'
+        'font-size:11px;color:#888;line-height:1.5;">'
+        '若不希望再收到類似來信，直接回信「退訂」即可，我們會立刻將您移除名單。'
+        '</div>'
+    )
+    suffix = unsub_footer + pixel
     # 盡量塞到 </body> 之前；若沒有，直接 append
     if "</body>" in html.lower():
         # 保留原本大小寫的 </body>
-        return re.sub(r"</body>", pixel + r"</body>", html, count=1, flags=re.IGNORECASE)
-    return html + pixel
+        return re.sub(r"</body>", suffix + r"</body>", html, count=1, flags=re.IGNORECASE)
+    return html + suffix
 
 
 # 裸網址偵測（升級純文字信為 HTML 時，自動包 <a>，讓追蹤覆蓋到）

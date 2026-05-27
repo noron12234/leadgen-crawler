@@ -459,6 +459,20 @@ def check_auth() -> bool:
             except Exception:
                 pass
 
+        # 自動帶入全公司共用 Gmail（如果 superadmin 有設定）
+        # → 業務員打開系統就能直接寄信、不用每次重輸 Gmail
+        try:
+            from database.db import get_shared_gmail
+            _shared = get_shared_gmail()
+            if _shared.get("gmail_user") and not st.session_state.get("gmail_user"):
+                st.session_state["gmail_user"] = _shared["gmail_user"]
+            if _shared.get("gmail_pwd") and not st.session_state.get("gmail_pwd"):
+                st.session_state["gmail_pwd"] = _shared["gmail_pwd"]
+            if _shared.get("sender_name") and not st.session_state.get("sender_name"):
+                st.session_state["sender_name"] = _shared["sender_name"]
+        except Exception:
+            pass  # 第一次跑 migration 未完成時不會擋登入
+
         # 登出按鈕改由 app.py 的 topnav 呼叫（見 render_user_chip）
         st.session_state["_authenticator"] = authenticator
         return True

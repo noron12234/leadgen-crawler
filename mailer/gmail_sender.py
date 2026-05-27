@@ -77,6 +77,16 @@ def send_email(
         msg["Subject"] = subject
         msg["From"] = formataddr((sender_name or user, user))
         msg["To"] = to
+        # Reply-To 給 Gmail 一個明確的回覆對象 — 降低「冷郵件」分類權重
+        msg["Reply-To"] = user
+        # RFC 8058 List-Unsubscribe — Gmail 看到這個會大幅降低「進促銷分頁」機率
+        # one-click unsubscribe via mailto；POST 表示支援一鍵退訂
+        import urllib.parse as _up
+        unsub_mailto = f"mailto:{user}?subject={_up.quote('Unsubscribe')}"
+        msg["List-Unsubscribe"] = f"<{unsub_mailto}>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        # 表明這是商業郵件而非垃圾，幫 Gmail 正確分類
+        msg["Precedence"] = "bulk"
 
         mime_type = "html" if html else "plain"
         msg.attach(MIMEText(body, mime_type, "utf-8"))

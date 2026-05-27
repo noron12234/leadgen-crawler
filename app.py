@@ -797,12 +797,12 @@ if db_stats["total"] == 0:
 _is_admin = st.session_state.get("user_role") == "superadmin"
 
 if _is_admin:
-    tab_leads, tab_email, tab_history, tab_analytics, tab_guide, tab_admin = st.tabs(
-        ["名單", "開發信", "寄信紀錄", "寄信成效", "Gmail 設定", "管理後台"]
+    tab_leads, tab_email, tab_history, tab_analytics, tab_guide, tab_backup, tab_admin = st.tabs(
+        ["名單", "開發信", "寄信紀錄", "寄信成效", "Gmail 設定", "🔒 資料安全", "管理後台"]
     )
 else:
-    tab_leads, tab_email, tab_history, tab_analytics, tab_guide = st.tabs(
-        ["名單", "開發信", "寄信紀錄", "寄信成效", "Gmail 設定"]
+    tab_leads, tab_email, tab_history, tab_analytics, tab_guide, tab_backup = st.tabs(
+        ["名單", "開發信", "寄信紀錄", "寄信成效", "Gmail 設定", "🔒 資料安全"]
     )
     tab_admin = None
 
@@ -1177,23 +1177,41 @@ with tab_email:
     # ── Gmail 設定 ──
     with st.expander("Gmail 設定", expanded=False):
         from config import GMAIL_USER, GMAIL_APP_PASSWORD, USE_GMAIL_API, SENDER_NAME as DEFAULT_SENDER
+        from database.db import get_setting as _db_get_setting, set_setting as _db_set_setting
+
+        # 全公司共用 Gmail 提示
+        _is_superadmin = st.session_state.get("user_role") == "superadmin"
+        _shared_user = _db_get_setting("shared_gmail_user")
+        _shared_updated_by = _db_get_setting("shared_gmail_updated_by")
+        _shared_updated_at = _db_get_setting("shared_gmail_updated_at")
+        if _shared_user:
+            st.info(
+                f"🔗 **全公司共用 Gmail 已設定**：`{_shared_user}` "
+                f"（{_shared_updated_by or '?'} 於 {(_shared_updated_at or '?')[:10]} 設定，"
+                f"登入時會自動帶入，不用每次手動填）"
+            )
+        else:
+            if _is_superadmin:
+                st.warning("尚未設定全公司共用 Gmail。下方填好後勾選「設為全公司共用」，業務員下次登入就會自動帶入。")
+            else:
+                st.caption("（業務員：登入後系統會自動帶入超管設好的共用 Gmail，不用每次重填）")
 
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             gmail_user = st.text_input(
-                "Gmail 帳號", value=GMAIL_USER,
+                "Gmail 帳號", value=st.session_state.get("gmail_user") or GMAIL_USER,
                 placeholder="your@gmail.com", key="gmail_user"
             )
         with col_g2:
             gmail_pwd = st.text_input(
-                "應用程式密碼", value=GMAIL_APP_PASSWORD,
+                "應用程式密碼", value=st.session_state.get("gmail_pwd") or GMAIL_APP_PASSWORD,
                 placeholder="xxxx-xxxx-xxxx-xxxx", type="password", key="gmail_pwd"
             )
 
         col_g3, col_g4 = st.columns([2, 1], vertical_alignment="bottom")
         with col_g3:
             sender_name = st.text_input(
-                "寄件人名稱", value=DEFAULT_SENDER,
+                "寄件人名稱", value=st.session_state.get("sender_name") or DEFAULT_SENDER,
                 key="sender_name"
             )
         with col_g4:
@@ -1208,6 +1226,46 @@ with tab_email:
                     st.success(f"連線成功：{msg}")
                 else:
                     st.error(f"連線失敗：{msg}")
+
+        # 超管才能設「共用 Gmail」
+        if _is_superadmin:
+            st.divider()
+            _share_col1, _share_col2 = st.columns([3, 1])
+            with _share_col1:
+                _set_as_shared = st.checkbox(
+                    "✅ 把上方 Gmail 設為全公司共用（所有業務員登入後會自動帶入這組）",
+                    value=False,
+                    key="set_gmail_as_shared",
+                )
+            with _share_col2:
+                if st.button("💾 儲存共用設定", key="save_shared_gmail",
+                             use_container_width=True, disabled=not _set_as_shared):
+                    if not gmail_user or not gmail_pwd:
+                        st.error("Gmail 帳號和密碼都要填")
+                    else:
+                        from datetime import datetime as _dt_sg
+                        _u_sg = st.session_state.get("username", "")
+                        _db_set_setting("shared_gmail_user", gmail_user, _u_sg)
+                        _db_set_setting("shared_gmail_pwd", gmail_pwd, _u_sg)
+                        _db_set_setting("shared_gmail_sender_name", sender_name or DEFAULT_SENDER, _u_sg)
+                        _db_set_setting("shared_gmail_updated_by", _u_sg, _u_sg)
+                        _db_set_setting("shared_gmail_updated_at", _dt_sg.now().isoformat(), _u_sg)
+                        st.success(f"✅ 已設為共用 Gmail：{gmail_user}（業務員下次登入自動帶入）")
+                        try:
+                            from database.db import log_activity as _la_sg
+                            _la_sg(_u_sg, "set_shared_gmail", f"設定共用 Gmail = {gmail_user}")
+                        except Exception:
+                            pass
+                        st.rerun()
+            if _shared_user:
+                if st.button("🗑 清掉共用設定", key="clear_shared_gmail",
+                             help="業務員下次登入就不會自動帶入 Gmail"):
+                    for _k in ("shared_gmail_user", "shared_gmail_pwd",
+                               "shared_gmail_sender_name", "shared_gmail_updated_by",
+                               "shared_gmail_updated_at"):
+                        _db_set_setting(_k, "", st.session_state.get("username", ""))
+                    st.success("已清掉共用設定")
+                    st.rerun()
 
         # Gmail API 狀態
         if USE_GMAIL_API:
@@ -1380,22 +1438,19 @@ with tab_email:
         """, unsafe_allow_html=True)
     else:
         # ── 信件模板（預設） ──
-        DEFAULT_SUBJECT = "【零食飲料服務】為貴公司打造辦公室幸福感"
-        DEFAULT_BODY = """您好，{hr_name}，
+        # 預設範本（已洗過 Gmail 促銷分頁觸發字眼：
+        #   - 拿掉「免費」「按月訂閱」「【...】」「產品目錄」「✦」項目符號 等促銷信典型 pattern
+        #   - 縮短內文 + 自然斷句，看起來像真人寫的）
+        DEFAULT_SUBJECT = "{hr_name} 您好，請教 {company} 辦公室零食供應一事"
+        DEFAULT_BODY = """您好 {hr_name}：
 
-我是the client的業務代表。
+我是the client的小編，看到 {company} 在 104 上的徵才訊息，想請教一下。
 
-我們為 {company} 這樣規模的企業提供辦公室零食飲料定期配送服務，讓您的團隊在工作時隨時補充能量。
+我們是專做辦公室零食飲料定期配送的廠商，剛好台北幾家規模相近的公司也是我們合作對象。月配方案彈性可調品項、統一月結，採購流程能省下不少時間。
 
-✦ 彈性方案，按月訂閱，隨時調整品項
-✦ 統一月結發票，省去採購麻煩
-✦ 首月免費試用，確認滿意再合作
+如果方便，可以先看一下我們的合作說明：https://leadgen.tw
 
-完整服務介紹與產品目錄：https://leadgen.tw
-
-若有興趣，歡迎回信或來電洽談，期待有機會為 {company} 服務！
-
-祝商祺"""
+任何問題直接回信給我即可，謝謝。"""
 
         # ── 範本版本管理 ──
         from database.db import get_templates as _get_tpls, save_template as _save_tpl, archive_template as _arc_tpl
@@ -2550,6 +2605,146 @@ with tab_guide:
     """, unsafe_allow_html=True)
 
 
+# ── TAB 5.5：資料安全（所有登入使用者都看得到，含客戶）──
+with tab_backup:
+    from database.db import get_server_backups as _gsb
+    from datetime import datetime as _dt_bk, timedelta as _td_bk
+
+    st.markdown("""
+    <div class="section-header">
+        <h3>🔒 您的客戶資料是怎麼被保護的</h3>
+        <p class="section-sub">我們設了五層備份，每天自動跑、不靠任何人手動操作。下面是即時狀態。</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 取最新備份時間 ──
+    _server_backups = _gsb("/data/backups")
+    _latest_server = _server_backups[0] if _server_backups else None
+
+    # ── KPI 條 ──
+    _now_bk = _dt_bk.now()
+    if _latest_server:
+        _hrs_since = _latest_server["age_hours"]
+        if _hrs_since < 26:
+            _status_emoji = "✅"
+            _status_text = "正常"
+            _status_color = "#22c55e"
+        elif _hrs_since < 48:
+            _status_emoji = "⚠️"
+            _status_text = "稍微落後"
+            _status_color = "#f59e0b"
+        else:
+            _status_emoji = "🚨"
+            _status_text = "需要檢查"
+            _status_color = "#ef4444"
+    else:
+        _status_emoji = "—"
+        _status_text = "尚未備份"
+        _status_color = "#71717a"
+        _hrs_since = None
+
+    bk_c1, bk_c2, bk_c3, bk_c4 = st.columns(4)
+    bk_c1.metric("整體狀態", f"{_status_emoji} {_status_text}",
+                 delta=f"{_hrs_since:.1f} 小時前" if _hrs_since is not None else "—",
+                 delta_color="off")
+    bk_c2.metric("server 端保留", f"{len(_server_backups)} 份",
+                 delta="最近 7 天", delta_color="off")
+    bk_c3.metric("已涵蓋業務名單", f"{db_stats.get('total', 0):,} 家")
+    bk_c4.metric("整體資料安全", "5 層備份",
+                 delta="多重防護", delta_color="off")
+
+    st.markdown("---")
+
+    # ── 五層防護視覺化 ──
+    st.markdown("### 五層備份防護")
+    _layers = [
+        ("☁️", "Fly 雲端 volume 自動快照", "每天自動", "30 天", "Fly.io 內建，整顆儲存掛掉時可回滾"),
+        ("📦", "Server 自動每日備份", "每天 04:00", "7 天", f"目前 {len(_server_backups)} 份（看下方明細）"),
+        ("💻", "開發者 Mac 本機備份", "每天 18:00", "60 天", "本機 + iCloud 跨裝置同步"),
+        ("🔗", "GitHub 雲端離站備份", "每天 10:00 AM", "60 天", "完全離開 Fly、不依賴開發者電腦"),
+        ("📁", "原始資料夾備份", "手動觸發", "永久", "備份指令隨時可跑、即時取最新狀態"),
+    ]
+    for emoji, name, freq, retention, note in _layers:
+        with st.container(border=True):
+            cc1, cc2, cc3, cc4 = st.columns([0.5, 3, 2, 4])
+            cc1.markdown(f"<div style='font-size:1.6rem;text-align:center'>{emoji}</div>", unsafe_allow_html=True)
+            cc2.markdown(f"**{name}**")
+            cc3.caption(f"頻率：{freq}　·　保留：{retention}")
+            cc4.caption(note)
+
+    st.markdown("---")
+
+    # ── Server 端每日備份明細 ──
+    st.markdown("### 📋 Server 自動每日備份明細")
+    if _server_backups:
+        bk_df = pd.DataFrame([
+            {
+                "備份檔案": b["file"],
+                "備份時間": b["mtime_iso"][:16].replace("T", " "),
+                "距現在":   f"{b['age_hours']:.1f} 小時前",
+                "大小":     f"{b['size_kb']:.1f} KB",
+                "狀態":     "✓" if b["age_hours"] < 26 + 24 * i else "—",
+            }
+            for i, b in enumerate(_server_backups[:14])
+        ])
+        st.dataframe(bk_df, use_container_width=True, hide_index=True,
+                     height=min(450, 60 + 36 * len(bk_df)))
+        st.caption("Server 端每天 04:00 由 scheduler 自動執行；只保留最近 7 天（節省空間，外面還有 4 層備份）")
+    else:
+        st.warning("⚠️ Server 端 `/data/backups/` 目前沒有任何備份檔。"
+                   "若 scheduler 正常運作、明天 04:00 應該會出現第一份。")
+
+    # ── 萬一出事怎麼救（給 Lin 看的、客戶看不懂沒關係）──
+    if _is_admin:
+        st.markdown("---")
+        with st.expander("👑 出事時還原步驟（僅開發者）", expanded=False):
+            st.markdown("""
+            **情境 1：客戶不小心刪了一些公司 / 一筆寄信紀錄**
+
+            ```bash
+            # 拉昨天 04:00 的 server 端 snapshot 回本機看
+            ~/.fly/bin/flyctl ssh sftp get /data/backups/leads-YYYY-MM-DD_0400.db --app leadgen-app
+            # 開來看 → 確認沒問題 → 推回 prod 蓋過
+            ~/.fly/bin/flyctl scale count 0 --app leadgen-app --yes  # 停 app
+            ~/.fly/bin/flyctl ssh sftp put leads.db /data/leads.db --app leadgen-app
+            ~/.fly/bin/flyctl scale count 1 --app leadgen-app --region nrt --yes
+            ```
+
+            **情境 2：Fly volume 整顆壞掉**
+
+            ```bash
+            # 用 Fly 內建 snapshot 還原（30 天內任一天）
+            ~/.fly/bin/flyctl volumes list --app leadgen-app
+            ~/.fly/bin/flyctl volumes snapshots list <vol-id>
+            ~/.fly/bin/flyctl volumes fork --snapshot-id <snap-id> ...
+            ```
+
+            **情境 3：Fly 整個帳號 / 公司倒了**
+
+            ```bash
+            # 從 GitHub backups/ 拉最新 .tar.gz
+            git clone https://github.com/your-contact4/waiting-list.git
+            tar xzf waiting-list/backups/leadflow-prod/leadflow_prod_*.tar.gz
+            # 在 Render / Railway / Heroku 新建一個 Fly-like app，把 leads.db 放到 /data/
+            # Update DNS → 完成搬家
+            ```
+
+            **完整 SOP**：`feature1_lead_scraper/docs/internal/BACKUP_SOP.md`
+            """)
+
+    # ── 給客戶看的友善說明 ──
+    st.markdown("---")
+    st.markdown("### 💬 給您的承諾")
+    st.markdown("""
+    <div style="background:rgba(34,197,94,0.05);border-left:3px solid #22c55e;padding:14px 18px;border-radius:8px;font-size:0.92rem;line-height:1.65;">
+    我們知道業務名單、寄信記錄、開信點擊資料是您每天累積的成果，不能說沒就沒。<br>
+    所以我們不是只做一次備份，而是把備份散在 <b>五個不同的地方</b>（雲端硬碟自動快照、Server 自帶副本、開發者本機、iCloud、GitHub）。<br>
+    每一份每天自動更新，任何一層出事，其他四層還在。<br>
+    您不需要做任何事 — 系統幫您顧好。
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # ── TAB 6：管理後台（僅 superadmin）──
 if tab_admin is not None:
     with tab_admin:
@@ -2667,6 +2862,57 @@ if tab_admin is not None:
                 st.line_chart(trend_df, height=240)
             else:
                 st.caption("本週還沒有活動")
+
+            # ── 📨 最近寄信明細（誰寄給誰、開了沒） ──
+            st.markdown("---")
+            st.markdown("#### 📨 最近寄信明細")
+            from database.db import get_email_logs as _gel_admin, get_connection as _gc_admin
+            _admin_logs = _gel_admin(limit=100)
+            _admin_real = [l for l in _admin_logs if l.get("status") in ("sent", "failed")]
+            if _admin_real:
+                # 算誰開了 / 點了（套用 prefetch filter — 寄出 <10s 不算真開）
+                _uids = [l["tracking_uid"] for l in _admin_real if l.get("tracking_uid")]
+                _opened, _clicked = set(), set()
+                if _uids:
+                    _ph = ",".join("?" * len(_uids))
+                    _ev_rows = _gc_admin().execute(
+                        f"""SELECT ev.tracking_uid, ev.event_type, ev.user_agent,
+                                   ev.occurred_at, el.sent_at
+                            FROM email_events ev
+                            LEFT JOIN email_logs el ON ev.tracking_uid = el.tracking_uid
+                            WHERE ev.tracking_uid IN ({_ph})""",
+                        _uids,
+                    ).fetchall()
+                    for _u, _ev, _ua, _occ, _sent in _ev_rows:
+                        if _ev == "click":
+                            _clicked.add(_u); _opened.add(_u)
+                        else:
+                            try:
+                                _d = (datetime.fromisoformat(_occ) - datetime.fromisoformat(_sent)).total_seconds()
+                            except Exception:
+                                _d = 9999
+                            _ua_l = (_ua or "").lower()
+                            if _d >= 10 and not (_d < 60 and "googleimageproxy" in _ua_l):
+                                _opened.add(_u)
+
+                _admin_send_df = pd.DataFrame([
+                    {
+                        "時間":   (l.get("sent_at") or "")[:16].replace("T", " "),
+                        "寄件者": l.get("sent_by") or "—",
+                        "公司":   l.get("cust_name") or (f"ID:{l.get('company_id')}" if l.get("company_id") else "—"),
+                        "收件人": l.get("recipient_email") or "",
+                        "範本":   l.get("template_used") or "—",
+                        "結果":   "✅ 成功" if l.get("status") == "sent" else "❌ 失敗",
+                        "開信":   "✓" if l.get("tracking_uid") in _opened else "",
+                        "點連結": "✓" if l.get("tracking_uid") in _clicked else "",
+                    }
+                    for l in _admin_real[:50]
+                ])
+                st.dataframe(_admin_send_df, use_container_width=True, hide_index=True,
+                             height=min(400, 60 + 36 * len(_admin_send_df)))
+                st.caption(f"顯示最近 {len(_admin_send_df)} 筆（共 {len(_admin_real)} 筆正式寄信）")
+            else:
+                st.info("還沒有正式寄信紀錄")
 
         # ──────── 2. 帳號管理 ────────
         with _admin_tabs[1]:

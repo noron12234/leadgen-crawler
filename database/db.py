@@ -256,6 +256,19 @@ def _run_migrations(conn: sqlite3.Connection):
         _set_schema_version(conn, 7)
         logger.info("Migration v7: email_templates 表（範本版本管理）")
 
+    if current < 8:
+        # v8: 全公司共用設定（共用 Gmail 等）— key/value store
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                updated_by  TEXT DEFAULT ''
+            )
+        """)
+        _set_schema_version(conn, 8)
+        logger.info("Migration v8: app_settings 表（共用 Gmail 等）")
+
     conn.commit()
 
 
@@ -645,6 +658,67 @@ def archive_template(template_id: int):
     conn = get_connection()
     conn.execute("UPDATE email_templates SET is_archived = 1 WHERE id = ?", (template_id,))
     conn.commit()
+
+
+# ══════════════════════════════════════════════════════
+# 全公司共用設定（共用 Gmail 等）
+# ══════════════════════════════════════════════════════
+
+def get_setting(key: str, default: str = "") -> str:
+    """讀取全公司共用設定"""
+    init_db()
+    conn = get_connection()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str, username: str = ""):
+    """寫入全公司共用設定（會覆蓋既有值）"""
+    init_db()
+    now = datetime.now().isoformat()
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO app_settings (key, value, updated_at, updated_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+    """, (key, value, now, username))
+    conn.commit()
+
+
+def get_shared_gmail() -> dict:
+    """一次拿全公司共用 Gmail 設定（給 app 啟動時填回 session_state）"""
+    return {
+        "gmail_user": get_setting("shared_gmail_user"),
+        "gmail_pwd": get_setting("shared_gmail_pwd"),
+        "sender_name": get_setting("shared_gmail_sender_name"),
+    }
+
+
+def get_server_backups(backup_dir: str = "/data/backups") -> list[dict]:
+    """列出 server 端 daily backup（scheduler.py 每天 4AM 寫的）。
+    回傳 [{file, size_kb, mtime, age_hours}, ...] 最新在前。
+    """
+    import os, time
+    from pathlib import Path
+    p = Path(backup_dir)
+    if not p.is_dir():
+        return []
+    now = time.time()
+    rows = []
+    for f in p.glob("leads-*.db"):
+        st = f.stat()
+        rows.append({
+            "file": f.name,
+            "size_kb": round(st.st_size / 1024, 1),
+            "mtime": st.st_mtime,
+            "mtime_iso": datetime.fromtimestamp(st.st_mtime).isoformat(),
+            "age_hours": round((now - st.st_mtime) / 3600, 1),
+        })
+    rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows
 
 
 # ══════════════════════════════════════════════════════
