@@ -86,6 +86,11 @@ def send_email(
     用 Resend 寄單封信。
     Returns: (True, "寄送成功") 或 (False, "錯誤訊息")
     """
+    from mailer.allowlist import is_allowed, block_message
+    if not is_allowed(to):
+        logger.warning(f"[Resend] [ALLOWLIST] BLOCKED → {to}")
+        return False, block_message(to)
+
     try:
         client = _get_client()
     except (ImportError, ValueError) as e:

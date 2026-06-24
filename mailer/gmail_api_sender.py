@@ -81,6 +81,11 @@ def send_email(
     Returns:
         (True, "寄送成功") 或 (False, "錯誤原因")
     """
+    from mailer.allowlist import is_allowed, block_message
+    if not is_allowed(to):
+        logger.warning(f"[Gmail API] [ALLOWLIST] BLOCKED → {to}")
+        return False, block_message(to)
+
     try:
         service = _get_gmail_service()
         profile = service.users().getProfile(userId="me").execute()

@@ -68,6 +68,11 @@ def send_email(
     Returns:
         (True, "寄送成功") 或 (False, "錯誤原因")
     """
+    from mailer.allowlist import is_allowed, block_message
+    if not is_allowed(to):
+        logger.warning(f"[SMTP] [ALLOWLIST] BLOCKED → {to}")
+        return False, block_message(to)
+
     user, pwd = _get_credentials()
     if not user or not pwd:
         return False, "未設定 GMAIL_USER 或 GMAIL_APP_PASSWORD"
@@ -123,13 +128,17 @@ def send_batch(
         list of {"email": str, "cust_name": str, "success": bool, "message": str}
     """
     import time
+    from mailer.allowlist import filter_recipients
 
     user, pwd = _get_credentials()
     if not user or not pwd:
         return [{**r, "success": False, "message": "未設定 GMAIL 帳密"} for r in recipients]
 
-    results = []
+    recipients, blocked = filter_recipients(recipients)
+    results = list(blocked)
     smtp_conn = None
+    if not recipients:
+        return results
 
     try:
         smtp_conn = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)

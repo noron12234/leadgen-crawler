@@ -27,7 +27,7 @@ try:
 except ImportError:
     DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 
 # ── Thread-local 連線池 ──
 _local = threading.local()
