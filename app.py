@@ -2196,6 +2196,40 @@ with tab_analytics:
                 st.dataframe(hot_df, use_container_width=True, hide_index=True,
                              height=min(320, 60 + 36 * len(hot_df)))
                 st.caption("這些客戶點過你信裡的連結 — 優先聯繫他們")
+
+                hot_full_df = pd.DataFrame([
+                    {
+                        "公司名稱": h.get("cust_name", ""),
+                        "點擊數": h.get("click_count", 0),
+                        "開信數": h.get("open_count", 0),
+                        "最近互動": (h.get("last_event_at") or "")[:16].replace("T", " "),
+                        "HR 姓名": h.get("hr_name") or "—",
+                        "Email": h.get("email") or "—",
+                        "電話": h.get("phone") or "—",
+                        "產業別": h.get("industry", ""),
+                        "員工數": h.get("employee_count", ""),
+                        "地址": h.get("address", ""),
+                        "零食": "⭐" if h.get("has_snack_benefit") else "",
+                        "福利標籤": "、".join(h.get("welfare_tags", [])),
+                        "職缺連結": h.get("job_url", ""),
+                        "公司頁面": h.get("company_url", ""),
+                        "官網": h.get("website", ""),
+                        "已聯繫": bool(h.get("contacted")),
+                        "來源": (h.get("source") or "").upper(),
+                        "誰抓的": h.get("crawled_by") or "—",
+                        "首次爬取": (h.get("first_seen") or "")[:10],
+                    }
+                    for h in _hot
+                ])
+                st.download_button(
+                    label="匯出熱門客戶 Excel",
+                    data=to_excel(hot_full_df),
+                    file_name=f"熱門客戶_{time.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_hot_leads",
+                    help="含名單全部欄位 + 點擊數/開信數，可直接匯入 ERP",
+                )
             else:
                 st.caption("還沒有客戶點過連結。客戶一點連結就會自動進這個列表。")
 
