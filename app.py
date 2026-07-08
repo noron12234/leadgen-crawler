@@ -667,7 +667,10 @@ with st.expander("更多工具", expanded=False):
                 valid_n = sum(1 for c in verified if c.get("email_status") == "valid")
                 suspect_n = sum(1 for c in verified if c.get("email_status") == "suspect")
                 invalid_n = sum(1 for c in verified if c.get("email_status") == "invalid")
-                st.success(f"有效 {valid_n} · 疑似 {suspect_n} · 無效 {invalid_n}")
+                from database.db import save_email_statuses
+                _saved_n = save_email_statuses(verified)
+                st.success(f"有效 {valid_n} · 疑似 {suspect_n} · 無效 {invalid_n}"
+                           f"（{_saved_n} 筆結果已存檔，重開頁面不會消失）")
                 st.session_state["email_verify_result"] = verified
 
     with _tc2:
@@ -979,7 +982,9 @@ with tab_leads:
                 "熱門": "熱門" if c.get("is_hot_lead") else "",
                 "HR 姓名": c.get("hr_name") or "—",
                 "Email": c.get("email") or "—",
-                "驗證": EMAIL_STATUS_ICON.get(verify_map.get(c.get("id"), ""), ""),
+                # 這次 session 剛驗完的優先，否則用 DB 存的上次結果
+                "驗證": EMAIL_STATUS_ICON.get(
+                    verify_map.get(c.get("id")) or c.get("email_status") or "", ""),
                 "電話": c.get("phone") or "—",
                 "產業別": c.get("industry", ""),
                 "員工數": c.get("employee_count", ""),
@@ -2139,7 +2144,8 @@ with tab_analytics:
                 f"開信率 {_tstats['open_rate']}% "
                 f"（原始 {_tstats['opened_raw']} 筆，過濾掉 {_tstats['prefetch_filtered']} 筆預掃）"),
             ("violet", "點了連結", _tstats["clicked"],   f"點擊率 {_tstats['click_rate']}%"),
-            ("green",  "熱門客戶", _tstats["hot_leads"], "點過連結就算熱門"),
+            ("amber",  "已回信",   _tstats.get("replied", 0), "用「掃描回信」更新"),
+            ("green",  "熱門客戶", _tstats["hot_leads"], "點過連結或回信就算熱門"),
         ]
         st.markdown(
             '<div class="kpi-strip">' + "".join(
@@ -2181,11 +2187,17 @@ with tab_analytics:
 
         with ac_hot:
             st.markdown("#### 熱門客戶")
-            _hot = get_hot_leads()
+            _hot_all = get_hot_leads()
+            _hide_contacted = st.toggle(
+                "隱藏已聯繫", value=False, key="hot_hide_contacted",
+                help="跟進完把名單頁的「已聯繫」打勾，這裡就能收起來，熱門名單不會越積越多")
+            _hot = ([h for h in _hot_all if not h.get("contacted")]
+                    if _hide_contacted else _hot_all)
             if _hot:
                 hot_df = pd.DataFrame([
                     {
                         "公司": h.get("cust_name", ""),
+                        "回信": h.get("reply_count", 0),
                         "點擊數": h.get("click_count", 0),
                         "開信數": h.get("open_count", 0),
                         "最近互動": (h.get("last_event_at") or "")[:16].replace("T", " "),
@@ -2195,16 +2207,20 @@ with tab_analytics:
                 ])
                 st.dataframe(hot_df, use_container_width=True, hide_index=True,
                              height=min(320, 60 + 36 * len(hot_df)))
-                st.caption("這些客戶點過你信裡的連結 — 優先聯繫他們")
+                st.caption("回過信 > 點過連結 > 開過信，由熱到冷排序。"
+                           "開信數為估計值（郵件服務的圖片代理會影響精度）")
 
                 hot_full_df = pd.DataFrame([
                     {
                         "公司名稱": h.get("cust_name", ""),
+                        "回信數": h.get("reply_count", 0),
                         "點擊數": h.get("click_count", 0),
                         "開信數": h.get("open_count", 0),
                         "最近互動": (h.get("last_event_at") or "")[:16].replace("T", " "),
                         "HR 姓名": h.get("hr_name") or "—",
                         "Email": h.get("email") or "—",
+                        "Email 驗證": {"valid": "有效", "suspect": "疑似",
+                                       "invalid": "無效"}.get(h.get("email_status") or "", ""),
                         "電話": h.get("phone") or "—",
                         "產業別": h.get("industry", ""),
                         "員工數": h.get("employee_count", ""),
@@ -2231,7 +2247,26 @@ with tab_analytics:
                     help="含名單全部欄位 + 點擊數/開信數，可直接匯入 ERP",
                 )
             else:
-                st.caption("還沒有客戶點過連結。客戶一點連結就會自動進這個列表。")
+                st.caption("還沒有客戶點過連結或回信。客戶一點連結、或回你的信，就會自動進這個列表。")
+
+            if st.button("📨 掃描回信", key="btn_scan_replies", use_container_width=True,
+                         help="登入寄信 Gmail 的收件匣，比對最近 30 天有沒有客戶回信；"
+                              "有回信的客戶自動標成熱門"):
+                import os as _os_rc
+                if st.session_state.get("gmail_user"):
+                    _os_rc.environ["GMAIL_USER"] = st.session_state["gmail_user"]
+                if st.session_state.get("gmail_pwd"):
+                    _os_rc.environ["GMAIL_APP_PASSWORD"] = st.session_state["gmail_pwd"]
+                from mailer.reply_checker import check_replies
+                with st.spinner("連線 Gmail 收件匣掃描中..."):
+                    _rr = check_replies(days=30)
+                if not _rr["ok"]:
+                    st.warning(_rr["message"])
+                elif _rr["new_replies"]:
+                    st.success(_rr["message"] + "：" + "、".join(_rr["matched_emails"][:5]))
+                    st.rerun()
+                else:
+                    st.info(_rr["message"])
 
         st.divider()
 

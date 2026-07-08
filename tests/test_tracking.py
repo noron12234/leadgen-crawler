@@ -116,8 +116,19 @@ class TestInjectTracking:
 # ══════════════════════════════════════════════════════
 
 class TestTrackingDb:
+    @staticmethod
+    def _backdate(uid, seconds=120):
+        """把寄出時間往前調 — 寄出後 <10 秒的 open 會被當 Google 預掃過濾，
+        測試裡寄完馬上記事件會全部被濾掉"""
+        from datetime import datetime, timedelta
+        from database.db import get_connection
+        past = (datetime.now() - timedelta(seconds=seconds)).isoformat()
+        conn = get_connection()
+        conn.execute("UPDATE email_logs SET sent_at = ? WHERE tracking_uid = ?", (past, uid))
+        conn.commit()
+
     def _seed_email(self, sample_companies):
-        """插入公司 + 寄信 log，回傳 (company_id, uid)"""
+        """插入公司 + 寄信 log（寄出時間在 2 分鐘前），回傳 (company_id, uid)"""
         from database.db import upsert_companies, get_all_companies, log_email_sent
         upsert_companies([sample_companies[0]])
         cid = get_all_companies()[0]["id"]
@@ -130,6 +141,7 @@ class TestTrackingDb:
             template_used="【測試主旨】模板A",
             tracking_uid=uid,
         )
+        self._backdate(uid)
         return cid, uid
 
     def test_open_event_increments_stats(self, tmp_db, sample_companies):
@@ -214,6 +226,8 @@ class TestTrackingDb:
         log_email_sent(cid_a, "a@x.com", "s", template_used="模板A", tracking_uid="U1")
         log_email_sent(cid_b, "b@x.com", "s", template_used="模板A", tracking_uid="U2")
         log_email_sent(cid_a, "a2@x.com", "s", template_used="模板B", tracking_uid="U3")
+        for _u in ("U1", "U2", "U3"):
+            self._backdate(_u)
 
         record_email_event("U1", "open")
         record_email_event("U1", "click", target_url="https://foo")
@@ -228,3 +242,77 @@ class TestTrackingDb:
 
         assert rows["模板B"]["sent"] == 1
         assert rows["模板B"]["opened"] == 0
+
+    # ── 回信追蹤（v9） ──
+
+    def test_reply_event_marks_hot_lead(self, tmp_db, sample_companies):
+        from database.db import record_email_event, get_tracking_stats, get_hot_leads
+        cid, uid = self._seed_email(sample_companies)
+
+        record_email_event(uid, "reply", target_url="<msgid-1@mail.gmail.com>",
+                           user_agent="imap-reply-checker")
+
+        stats = get_tracking_stats()
+        assert stats["replied"] == 1
+        assert stats["hot_leads"] == 1  # 回信 = 熱門
+
+        hot = get_hot_leads()
+        assert len(hot) == 1
+        assert hot[0]["id"] == cid
+        assert hot[0]["reply_count"] == 1
+        assert hot[0]["click_count"] == 0
+
+    def test_reply_counts_as_real_open(self, tmp_db, sample_companies):
+        """回信代表客戶必然讀過信 — 應計入「確認開信」"""
+        from database.db import record_email_event, get_tracking_stats
+        _, uid = self._seed_email(sample_companies)
+        record_email_event(uid, "reply", target_url="<msgid-2@mail.gmail.com>")
+        assert get_tracking_stats()["opened"] == 1
+
+    def test_hot_lead_open_count_filters_prefetch(self, tmp_db, sample_companies):
+        """熱門客戶的開信數要跟總覽同口徑：預掃 open 不計入"""
+        from datetime import datetime
+        from database.db import record_email_event, get_hot_leads, get_connection
+
+        _, uid = self._seed_email(sample_companies)
+        record_email_event(uid, "click", target_url="https://foo.com")  # 進熱門
+        record_email_event(uid, "open", user_agent="Mozilla/5.0")       # 真實開信
+
+        # 手動塞一筆「寄出後 1 秒」的預掃 open（繞過 record 的 dedupe）
+        conn = get_connection()
+        sent_at = conn.execute(
+            "SELECT sent_at FROM email_logs WHERE tracking_uid = ?", (uid,)
+        ).fetchone()["sent_at"]
+        prefetch_at = (datetime.fromisoformat(sent_at)).isoformat()
+        conn.execute(
+            "INSERT INTO email_events (tracking_uid, event_type, occurred_at, user_agent) "
+            "VALUES (?, 'open', ?, 'GoogleImageProxy')", (uid, prefetch_at))
+        conn.commit()
+
+        hot = get_hot_leads()
+        assert hot[0]["open_count"] == 1  # 預掃那筆不算
+
+
+class TestEmailStatusPersistence:
+    def test_save_and_readback(self, tmp_db, sample_companies):
+        from database.db import upsert_companies, get_all_companies, save_email_statuses
+        upsert_companies([sample_companies[0]])
+        c = get_all_companies()[0]
+        assert c.get("email_status") == ""  # v9 預設空
+
+        n = save_email_statuses([{"id": c["id"], "email_status": "valid"}])
+        assert n == 1
+        c2 = get_all_companies()[0]
+        assert c2["email_status"] == "valid"
+        assert c2["email_checked_at"] != ""
+
+    def test_skips_rows_without_id_or_status(self, tmp_db, sample_companies):
+        from database.db import upsert_companies, get_all_companies, save_email_statuses
+        upsert_companies([sample_companies[0]])
+        cid = get_all_companies()[0]["id"]
+        n = save_email_statuses([
+            {"id": None, "email_status": "valid"},
+            {"id": cid, "email_status": ""},
+        ])
+        assert n == 0
+        assert get_all_companies()[0]["email_status"] == ""

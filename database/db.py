@@ -27,7 +27,7 @@ try:
 except ImportError:
     DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 # ── Thread-local 連線池 ──
 _local = threading.local()
@@ -269,6 +269,17 @@ def _run_migrations(conn: sqlite3.Connection):
         _set_schema_version(conn, 8)
         logger.info("Migration v8: app_settings 表（共用 Gmail 等）")
 
+    if current < 9:
+        # v9: email 驗證結果落地（原本只存 session、重開就消失）
+        #     + email_events.event_type 開放 'reply'（IMAP 回信偵測）
+        company_cols = {row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()}
+        if "email_status" not in company_cols:
+            conn.execute("ALTER TABLE companies ADD COLUMN email_status TEXT DEFAULT ''")
+        if "email_checked_at" not in company_cols:
+            conn.execute("ALTER TABLE companies ADD COLUMN email_checked_at TEXT DEFAULT ''")
+        _set_schema_version(conn, 9)
+        logger.info("Migration v9: companies 加 email_status / email_checked_at")
+
     conn.commit()
 
 
@@ -414,6 +425,23 @@ def get_stats() -> dict:
         "contacted": contacted,
         "remaining": total - contacted,
     }
+
+
+def save_email_statuses(companies: list[dict]) -> int:
+    """把 email 驗證結果寫回 companies，重開頁面不再消失。回傳更新筆數。"""
+    init_db()
+    conn = get_connection()
+    now = datetime.now().isoformat()
+    n = 0
+    for c in companies:
+        if c.get("id") and c.get("email_status"):
+            conn.execute(
+                "UPDATE companies SET email_status = ?, email_checked_at = ? WHERE id = ?",
+                (c["email_status"], now, c["id"]),
+            )
+            n += 1
+    conn.commit()
+    return n
 
 
 def mark_contacted(company_id: int, contacted: bool = True):
@@ -752,20 +780,22 @@ def record_email_event(
     target_url: str = "",
     user_agent: str = "",
     ip_hash: str = "",
+    occurred_at: str = "",
 ):
     """
-    記錄一筆開信/點擊事件，並在必要時將該公司標記為熱門客戶。
-    event_type: 'open' | 'click'
+    記錄一筆開信/點擊/回信事件，並在必要時將該公司標記為熱門客戶。
+    event_type: 'open' | 'click' | 'reply'
+    occurred_at: 事件實際發生時間（ISO），空值用現在 — 回信偵測要帶信件的 Date
 
     只會過濾企業反釣魚掃描器（Proofpoint / Mimecast 等）的 UA，其餘都記。
     Gmail / Outlook 的 image proxy 會把 open pixel 提早觸發，接受這個誤差 —
     業界郵件追蹤工具都這樣做。
     """
-    if event_type not in ("open", "click"):
+    if event_type not in ("open", "click", "reply"):
         return
     init_db()
     conn = get_connection()
-    now = datetime.now().isoformat()
+    now = occurred_at or datetime.now().isoformat()
 
     if event_type == "open" and _is_scanner_ua(user_agent):
         logger.info(f"略過反釣魚掃描器 open: uid={tracking_uid[:8]} ua={user_agent[:60]}")
@@ -794,8 +824,8 @@ def record_email_event(
         VALUES (?, ?, ?, ?, ?, ?)
     """, (tracking_uid, event_type, now, target_url, user_agent, ip_hash))
 
-    # 熱門客戶：只要點擊任一連結即標記
-    if event_type == "click":
+    # 熱門客戶：點擊任一連結、或回信，即標記
+    if event_type in ("click", "reply"):
         row = conn.execute(
             "SELECT company_id FROM email_logs WHERE tracking_uid = ?", (tracking_uid,)
         ).fetchone()
@@ -817,16 +847,14 @@ def record_email_event(
 _PROXY_UA_PATTERNS = ("googleimageproxy", "ggpht.com",
                       "microsoft outlook protection", "atplinks", "safelinks")
 
-_REAL_OPEN_SQL = """
-    SELECT DISTINCT ev.tracking_uid
-    FROM email_events ev
-    JOIN email_logs el ON ev.tracking_uid = el.tracking_uid
-    WHERE ev.event_type IN ('open','click')
-      AND el.tracking_uid IS NOT NULL AND el.tracking_uid != ''
-      AND (
-          ev.event_type = 'click'
+# 「真實開信」判斷片段 — 需要查詢裡有 ev（email_events）、el（email_logs）兩個 alias。
+# 所有要算開信數的地方（總覽 / 模板比較 / 熱門客戶）都引用這段，口徑才會一致。
+_REAL_OPEN_COND = """
+      (
+          ev.event_type IN ('click','reply')
           OR (
-              (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) >= 10
+              ev.event_type = 'open'
+              AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) >= 10
               AND NOT (
                   LOWER(COALESCE(ev.user_agent, '')) LIKE '%googleimageproxy%'
                   AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) < 60
@@ -839,6 +867,15 @@ _REAL_OPEN_SQL = """
               AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%safelinks%'
           )
       )
+"""
+
+_REAL_OPEN_SQL = f"""
+    SELECT DISTINCT ev.tracking_uid
+    FROM email_events ev
+    JOIN email_logs el ON ev.tracking_uid = el.tracking_uid
+    WHERE ev.event_type IN ('open','click','reply')
+      AND el.tracking_uid IS NOT NULL AND el.tracking_uid != ''
+      AND {_REAL_OPEN_COND}
 """
 
 _ALL_OPEN_SQL = """
@@ -866,6 +903,9 @@ def get_tracking_stats() -> dict:
     clicked = conn.execute(
         "SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='click'"
     ).fetchone()[0]
+    replied = conn.execute(
+        "SELECT COUNT(DISTINCT tracking_uid) FROM email_events WHERE event_type='reply'"
+    ).fetchone()[0]
     hot = conn.execute("SELECT COUNT(*) FROM companies WHERE is_hot_lead = 1").fetchone()[0]
 
     def _pct(n, d):
@@ -877,6 +917,7 @@ def get_tracking_stats() -> dict:
         "opened_raw": opened_raw,
         "prefetch_filtered": opened_raw - opened,
         "clicked": clicked,
+        "replied": replied,
         "hot_leads": hot,
         "open_rate": _pct(opened, sent),
         "open_rate_raw": _pct(opened_raw, sent),
@@ -889,28 +930,15 @@ def get_template_stats() -> list[dict]:
     """各模板成效比較：寄出 / 開信（過濾預掃）/ 點擊"""
     init_db()
     conn = get_connection()
-    # 同樣套用 _REAL_OPEN_SQL 的過濾邏輯：早於 10s 或 GoogleImageProxy 預掃不算
-    rows = conn.execute("""
+    # 開信過濾直接引用 _REAL_OPEN_COND，與總覽/熱門客戶同一口徑
+    rows = conn.execute(f"""
         SELECT
             COALESCE(NULLIF(template_used, ''), '（未分類）') AS template,
             COUNT(*) AS sent,
             SUM(CASE WHEN EXISTS (
                 SELECT 1 FROM email_events ev
                 WHERE ev.tracking_uid = el.tracking_uid
-                  AND (
-                    ev.event_type = 'click'
-                    OR (
-                      ev.event_type = 'open'
-                      AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) >= 10
-                      AND NOT (
-                        LOWER(COALESCE(ev.user_agent, '')) LIKE '%googleimageproxy%'
-                        AND (CAST((julianday(ev.occurred_at) - julianday(el.sent_at)) * 86400 AS INTEGER)) < 60
-                      )
-                      AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%proofpoint%'
-                      AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%mimecast%'
-                      AND LOWER(COALESCE(ev.user_agent, '')) NOT LIKE '%safelinks%'
-                    )
-                  )
+                  AND {_REAL_OPEN_COND}
             ) THEN 1 ELSE 0 END) AS opened,
             SUM(CASE WHEN EXISTS (
                 SELECT 1 FROM email_events ev WHERE ev.tracking_uid = el.tracking_uid AND ev.event_type='click'
@@ -940,17 +968,21 @@ def get_hot_leads() -> list[dict]:
     """列出熱門客戶（有點擊過），依點擊次數排序"""
     init_db()
     conn = get_connection()
-    rows = conn.execute("""
+    # open_count 套用與總覽相同的預掃過濾（_REAL_OPEN_COND），
+    # 不然匯出到 ERP 的開信數會比儀表板「確認開信」偏高、對不上
+    rows = conn.execute(f"""
         SELECT c.*,
-               COUNT(DISTINCT CASE WHEN ev.event_type='open'  THEN ev.id END) AS open_count,
+               COUNT(DISTINCT CASE WHEN ev.event_type='open' AND {_REAL_OPEN_COND}
+                     THEN ev.id END) AS open_count,
                COUNT(DISTINCT CASE WHEN ev.event_type='click' THEN ev.id END) AS click_count,
+               COUNT(DISTINCT CASE WHEN ev.event_type='reply' THEN ev.id END) AS reply_count,
                MAX(ev.occurred_at) AS last_event_at
         FROM companies c
         JOIN email_logs el ON el.company_id = c.id
         JOIN email_events ev ON ev.tracking_uid = el.tracking_uid
         WHERE c.is_hot_lead = 1
         GROUP BY c.id
-        ORDER BY click_count DESC, open_count DESC, last_event_at DESC
+        ORDER BY reply_count DESC, click_count DESC, open_count DESC, last_event_at DESC
     """).fetchall()
     result = []
     for row in rows:
