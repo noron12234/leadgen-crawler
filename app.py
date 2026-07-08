@@ -3185,21 +3185,23 @@ if tab_admin is not None:
             with dz1:
                 if st.button("清空所有活動紀錄", key="admin_clear_activity",
                              use_container_width=True):
-                    from database.db import get_connection
+                    from database.db import get_connection, snapshot_db
+                    snapshot_db("clear-activity")
                     get_connection().execute("DELETE FROM activity_log")
                     get_connection().commit()
-                    st.success("已清空活動紀錄")
+                    st.success("已清空活動紀錄（已自動留存快照）")
                     st.rerun()
 
             with dz2:
                 if st.button("清空所有寄信紀錄", key="admin_clear_emails",
                              use_container_width=True):
-                    from database.db import get_connection as _gc_ae
+                    from database.db import get_connection as _gc_ae, snapshot_db as _snap_ae
+                    _snap_ae("clear-emails")
                     _c = _gc_ae()
                     _c.execute("DELETE FROM email_events")
                     _c.execute("DELETE FROM email_logs")
                     _c.commit()
-                    st.success("已清空寄信紀錄與追蹤事件")
+                    st.success("已清空寄信紀錄與追蹤事件（已自動留存快照）")
                     st.rerun()
 
             st.divider()

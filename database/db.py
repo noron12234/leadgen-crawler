@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 try:
     from config import DB_PATH
 except ImportError:
+    # 這個 fallback 曾造成事故：外部腳本以為指到暫存 DB，實際寫進開發 DB。
+    # fallback 觸發時大聲講，讓跑腳本的人（或 agent）第一時間看到
     DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
+    logging.getLogger(__name__).warning(
+        f"config 匯入失敗（通常是缺 python-dotenv 等依賴），"
+        f"DB 路徑 fallback 到 {DB_PATH} — 如果你以為自己連的是別的 DB，現在就停下來"
+    )
 
 CURRENT_SCHEMA_VERSION = 9
 
@@ -44,6 +50,17 @@ def get_connection() -> sqlite3.Connection:
             _local.conn = None
 
     db_path = Path(DB_PATH)
+
+    # 測試防污染 guard：pytest 執行中絕不允許連到真實 DB。
+    # 正確做法是用 tests/conftest.py 的 tmp_db fixture（會 patch DB_PATH 到暫存目錄）
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        _p = str(db_path).lower()
+        if not any(k in _p for k in ("pytest", "test", "tmp", "temp")):
+            raise RuntimeError(
+                f"測試中拒絕連到真實 DB：{db_path}\n"
+                f"請用 tmp_db fixture，或把 DATA_DIR 指到暫存目錄。"
+            )
+
     db_path.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -631,9 +648,33 @@ def get_email_log_stats() -> dict:
     return {"total": total, "sent": sent, "failed": failed}
 
 
-def clear_all():
-    """清空所有公司資料與寄信記錄"""
+def snapshot_db(tag: str = "manual") -> str:
+    """
+    破壞性操作前的自動快照（SQLite online backup，不鎖表）。
+    存到 <DB 同層>/backups/pre-{tag}-{時間}.db。
+    scheduler 的輪替只刪 leads-*.db，pre-* 檔不會被輪掉 = 永久保留。
+    快照失敗會 raise — 拍不到照就不准刪資料。
+    """
     init_db()
+    db_path = Path(DB_PATH)
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    snap_path = backup_dir / f"pre-{tag}-{ts}.db"
+    src = get_connection()
+    dst = sqlite3.connect(str(snap_path))
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+    logger.info(f"破壞性操作前快照：{snap_path}")
+    return str(snap_path)
+
+
+def clear_all():
+    """清空所有公司資料與寄信記錄（會先自動拍快照）"""
+    init_db()
+    snapshot_db("clear-all")
     conn = get_connection()
     conn.execute("DELETE FROM email_events")
     conn.execute("DELETE FROM email_logs")
@@ -1079,8 +1120,9 @@ def update_person_notes(person_id: int, notes: str):
 
 
 def delete_linkedin_people_all():
-    """清空所有 LinkedIn 人物"""
+    """清空所有 LinkedIn 人物（會先自動拍快照）"""
     init_db()
+    snapshot_db("clear-linkedin")
     conn = get_connection()
     conn.execute("DELETE FROM linkedin_people")
     conn.commit()
