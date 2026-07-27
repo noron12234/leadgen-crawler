@@ -3,6 +3,8 @@
 # LeadGen — B2B Lead Pipeline
 ### B2B 名單開發系統
 
+[![tests](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml/badge.svg)](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml)
+
 A production lead-generation system: crawls four recruiting platforms weekly, deduplicates across three layers, enriches companies with contact emails, and runs cold email campaigns with open/click tracking — all under daily quota control.
 
 Built and operated for a real B2B distributor. Roughly 10,700 lines of Python, running on Fly.io.

@@ -34,6 +34,8 @@
 
 ### 幾個值得說明的設計決策
 
+[![tests](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml/badge.svg)](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml)
+
 **爬蟲獨立性。** 每個爬蟲完全隔離。某個平台改了 selector 不會拖垮其他三個 —— 失敗會被記錄，這一輪繼續用成功的部分跑完。
 
 **三層去重。** 爬蟲層的 `seen_ids`、cleaner 的正規化公司名比對、資料庫的 `UNIQUE` 約束。每一層攔下前一層漏掉的。
