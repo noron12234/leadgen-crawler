@@ -2,6 +2,8 @@
 
 # LeadGen — B2B 名單開發系統
 
+[![tests](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml/badge.svg)](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml)
+
 一套上線運作的名單開發系統：每週爬四個招募平台、三層去重、補齊聯絡 email、寄送開發信並追蹤開信與點擊 —— 全部在每日配額控管之下。
 
 為一間真實的 B2B 經銷商打造並實際營運。約 10,700 行 Python，跑在 Fly.io 上。
@@ -33,8 +35,6 @@
 ```
 
 ### 幾個值得說明的設計決策
-
-[![tests](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml/badge.svg)](https://github.com/noron12234/leadgen-crawler/actions/workflows/tests.yml)
 
 **爬蟲獨立性。** 每個爬蟲完全隔離。某個平台改了 selector 不會拖垮其他三個 —— 失敗會被記錄，這一輪繼續用成功的部分跑完。
 
